@@ -670,7 +670,8 @@ enum class insn_class : uint8_t {
   ext_s,
   ext_m,            ext_m_rv64,
   zba,              zba_rv64,
-  zbb,              zbb_rv64,
+  zbb,              zbb_rv32,       // EXT_ZBB + xlen==32 (zext.h uses MATCH_PACK)
+                    zbb_rv64,       // EXT_ZBB + rv64    (zext.h uses MATCH_PACKW)
   zbc,              zbs,
   zbkb,             zbkb_rv64,
   svinval,
@@ -757,6 +758,7 @@ static bool insn_class_enabled(insn_class cls, const isa_parser_t *isa, bool s)
     case ic::zba:             return ext(EXT_ZBA);
     case ic::zba_rv64:        return ext(EXT_ZBA)      && xv(64);
     case ic::zbb:             return ext(EXT_ZBB);
+    case ic::zbb_rv32:        return ext(EXT_ZBB)      && xv(32);
     case ic::zbb_rv64:        return ext(EXT_ZBB)      && xv(64);
     case ic::zbc:             return ext(EXT_ZBC);
     case ic::zbs:             return ext(EXT_ZBS);
@@ -1124,6 +1126,10 @@ static const disasm_opcode_t all_insns[] = {
   {"ctzw",  MATCH_CTZW,  MASK_CTZW,  "ds", zbb_rv64},
   {"clzw",  MATCH_CLZW,  MASK_CLZW,  "ds", zbb_rv64},
   {"cpopw", MATCH_CPOPW, MASK_CPOPW, "ds", zbb_rv64},
+  // zext.h: like binutils, two entries with different xlen — MATCH_PACK (RV32)
+  // and MATCH_PACKW (RV64) — so no runtime xlen check needed in add_instructions
+  {"zext.h", MATCH_PACK,  MASK_PACK  | MASK_RS2, "ds", zbb_rv32},
+  {"zext.h", MATCH_PACKW, MASK_PACKW | MASK_RS2, "ds", zbb_rv64},
   // zbc_insns
   {"clmul",  MATCH_CLMUL,  MASK_CLMUL,  "dst", zbc},
   {"clmulh", MATCH_CLMULH, MASK_CLMULH, "dst", zbc},
@@ -3381,13 +3387,8 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
     if (insn_class_enabled(op.cls, isa, strict))
       add_insn(new disasm_insn_t(op.name, op.match, op.mask, parse_fmt(op.fmt)));
 
-  // zext.h: xlen-dependent match, cannot be in static table
-  if (ext_enabled(EXT_ZBB))
-    add_insn(new disasm_insn_t("zext.h",
-      (isa->get_max_xlen() == 32 ? MATCH_PACK : MATCH_PACKW),
-      MASK_PACK | (0x1fUL << 20), {&xrd, &xrs1}));
-
 }
+
 
 
 disassembler_t::disassembler_t(const isa_parser_t *isa, bool strict)
