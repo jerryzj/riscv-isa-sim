@@ -3374,14 +3374,6 @@ static const disasm_opcode_t all_insns[] = {
   {"aes32esmi", MATCH_AES32ESMI, MASK_AES32ESMI, "dst-", zkne_rv32},
 };
 
-#undef EXT1
-#undef XV
-#undef XVS
-#undef EXT1_XV
-#undef EXT1_XVS
-#undef EXT2
-#undef EXT2_XV
-
 void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
 {
   // Flat table iteration (like binutils riscv_opcodes[])
