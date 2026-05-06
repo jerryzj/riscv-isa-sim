@@ -856,50 +856,125 @@ struct disasm_opcode_t {
   insn_class cls;   // like binutils' insn_class field — see insn_class_enabled()
 };
 
-// Array-based fmt_char_to_arg: O(1) lookup, reads like a flat table.
+// Explicit format-character → arg_t* mapping table.
+// This struct array is the definitive reference for all format characters —
+// the lookup array is derived from it, so there is no hidden mapping elsewhere.
+// '?' is the optional-argument marker and is handled separately in parse_fmt.
+static const struct { char code; const arg_t *arg; } fmt_chars[] = {
+  // Integer registers (follows binutils riscv-dis.c convention)
+  {'d', &xrd},    // rd   — integer destination
+  {'s', &xrs1},   // rs1  — integer source 1
+  {'t', &xrs2},   // rs2  — integer source 2
+  {'r', &xrs3},   // rs3  — integer source 3 (R4-type, e.g. fmadd)
+  // Floating-point registers
+  {'D', &frd},    // frd  — FP destination
+  {'S', &frs1},   // frs1 — FP source 1
+  {'T', &frs2},   // frs2 — FP source 2
+  {'R', &frs3},   // frs3 — FP source 3 (FP fused multiply-add)
+  // Vector registers
+  {'A', &vd},     // vd   — vector destination
+  {'B', &vs1},    // vs1  — vector source 1
+  {'C', &vs2},    // vs2  — vector source 2
+  {'G', &vs3},    // vs3  — vector source 3 (vector store data)
+  // P-extension register pairs (even-numbered registers)
+  {'P', &xrd_p},  // rdp  — integer register pair destination
+  {'Q', &xrs1_p}, // rs1p — integer register pair source 1
+  {'U', &xrs2_p}, // rs2p — integer register pair source 2
+  // Immediates — standard
+  {'j', &imm},       // I-type signed immediate (addi, lw, jalr, ...)
+  {'Z', &shamt},     // shift amount (slli, srli, srai, ...)
+  {'u', &bigimm},    // U-type upper immediate >> 12, hex (lui, auipc)
+  {'z', &zimm5},     // zero-extended 5-bit immediate (CSR uimm, vsetivli)
+  // Immediates — vector
+  {'5', &v_simm5},   // vector signed 5-bit immediate
+  {'6', &v_zimm6},   // vector zero-extended 6-bit immediate (Zvbb ror/vror)
+  {'L', &fli_imm},   // FLI float-constant index (Zfa fli.s/d/h)
+  {'W', &v_vtype},   // vtype field (vsetvli, vsetivli)
+  // Immediates — branch/jump targets
+  {'p', &branch_target}, // B-type PC-relative branch target
+  {'a', &jump_target},   // J-type PC-relative jump target (jal)
+  // Immediates — other
+  {'>', &b_imm5},    // branch immediate (Zibi beqi/bnei)
+  // Immediates — P-extension
+  {'7', &p_imm8},       // packed 8-bit immediate
+  {'$', &p_imm10csl},   // packed 10-bit immediate (left-shift)
+  {'%', &p_imm10csr},   // packed 10-bit immediate (right-shift)
+  {'&', &p_imm10csrw},  // packed 10-bit immediate (right-shift, wider)
+  // Shamt variants (width-specific shift amounts for P-extension)
+  {'\'', &shamtd},  // 64-bit shamt
+  {'<',  &shamtw},  // 32-bit shamt
+  {';',  &shamth},  // 16-bit shamt
+  {':',  &shamtb},  // 8-bit  shamt
+  // Scalar crypto arguments
+  {'-', &bs},    // AES byte-select (aes32dsi, aes32esi, sm4ed, sm4ks)
+  {'+', &rcon},  // AES round constant (aes64ks1i)
+  // Memory addresses
+  {'o', &load_address},       // imm(rs1)  — load  offset+base
+  {'q', &store_address},      // imm(rs1)  — store offset+base
+  {'(', &base_only_address},  // (rs1)     — base-only (AMO, vector)
+  // CSR / special
+  {'E', &csr},            // CSR register number
+  {'m', &rm},             // floating-point rounding mode
+  {'I', &iorw},           // fence predecessor/successor bits
+  {'0', &x0},             // literal x0 (vmv.x.s, vmv.s.x)
+  // Vector mask operands
+  {'k', &vm},   // optional mask (v0.t or absent)
+  {'K', &v0},   // literal v0 (vadc, vsbc, vmerge destination mask)
+  // RVC — full-width registers (5-bit fields in CR/CI formats)
+  {'e', &rvc_rs1},     // rs1  5-bit (c.jr, c.jalr, c.slli, ...)
+  {'f', &rvc_rs2},     // rs2  5-bit (c.mv, c.add, c.swsp, ...)
+  {'F', &rvc_fp_rs2},  // frs2 5-bit (c.fswsp, c.fsdsp)
+  // RVC — compressed registers (3-bit CL/CS/CA/CB fields, offset by 8)
+  {'H', &rvc_rs1s},    // rs1' 3-bit (c.lw, c.sw, c.add, c.sub, ...)
+  {'J', &rvc_rs2s},    // rs2' 3-bit
+  {'#', &rvc_fp_rs2s}, // frs2' 3-bit (c.flw, c.fld, ...)
+  // RVC — fixed-register aliases
+  {'N', &rvc_sp},   // x2  (sp)  — c.lwsp, c.ldsp, c.addi16sp
+  {'X', &rvc_ra},   // x1  (ra)  — c.sspush
+  {'Y', &rvc_t0},   // x5  (t0)  — c.sspopchk
+  {'V', &rvc_r1s},  // first  register of cm.mva01s / cm.mvsa01
+  {'O', &rvc_r2s},  // second register of cm.mva01s / cm.mvsa01
+  // RVC — immediates
+  {'i', &rvc_imm},             // general nzimm6
+  {'n', &rvc_addi4spn_imm},    // c.addi4spn (nzuimm8)
+  {'x', &rvc_addi16sp_imm},    // c.addi16sp (nzimm10)
+  {'l', &rvc_lwsp_imm},        // c.lwsp (uimm6)
+  {'h', &rvc_shamt},           // c.slli/c.srli/c.srai shamt
+  {'b', &rvc_uimm},            // c.lui upper immediate
+  // RVC — memory addresses
+  {'@', &rvc_lwsp_address},  // uimm6(sp) — c.lwsp
+  {'M', &rvc_ldsp_address},  // uimm6(sp) — c.ldsp
+  {'_', &rvc_swsp_address},  // uimm6(sp) — c.swsp
+  {'g', &rvc_sdsp_address},  // uimm6(sp) — c.sdsp
+  {'c', &rvc_lw_address},    // uimm5(rs1') — c.lw / c.sw
+  {'v', &rvc_ld_address},    // uimm5(rs1') — c.ld / c.sd
+  // RVC — branch/jump targets
+  {'y', &rvc_branch_target}, // c.beqz / c.bnez target
+  {'w', &rvc_jump_target},   // c.j target
+  // Zcmp push/pop
+  {'1', &rvcm_jt_index},          // cm.jt / cm.jalt index
+  {'!', &rvcm_pushpop_rlist},     // {ra, s0-sN} register list
+  {'2', &rvcm_push_stack_adj_32}, // stack adjustment (push, RV32)
+  {'4', &rvcm_push_stack_adj_64}, // stack adjustment (push, RV64)
+  {'3', &rvcm_pop_stack_adj_32},  // stack adjustment (pop,  RV32)
+  {'8', &rvcm_pop_stack_adj_64},  // stack adjustment (pop,  RV64)
+  // Zcb byte/halfword addresses
+  {'*', &rvb_b_address}, // byte-scaled offset (c.lbu, c.sb)
+  {'/', &rvb_h_address}, // halfword-scaled offset (c.lhu, c.lh, c.sh)
+};
+
+// Build an O(1) lookup array from the explicit fmt_chars table above.
 static const arg_t *fmt_char_to_arg(char c)
 {
-  static const auto table = []() {
+  static const auto lut = []() {
     std::array<const arg_t*, 128> t{};
-    // Integer registers
-    t['d'] = &xrd;   t['s'] = &xrs1;  t['t'] = &xrs2;  t['r'] = &xrs3;
-    // Float registers
-    t['D'] = &frd;   t['S'] = &frs1;  t['T'] = &frs2;  t['R'] = &frs3;
-    // Vector registers
-    t['A'] = &vd;    t['B'] = &vs1;   t['C'] = &vs2;   t['G'] = &vs3;
-    // P-extension register pairs
-    t['P'] = &xrd_p; t['Q'] = &xrs1_p; t['U'] = &xrs2_p;
-    // Immediates
-    t['j'] = &imm;      t['Z'] = &shamt;      t['u'] = &bigimm;    t['z'] = &zimm5;
-    t['5'] = &v_simm5;  t['6'] = &v_zimm6;    t['L'] = &fli_imm;   t['>'] = &b_imm5;
-    t['\'']=&shamtd;   t['<'] = &shamtw;     t[';'] = &shamth;    t[':'] = &shamtb;
-    t['7'] = &p_imm8;   t['$'] = &p_imm10csl; t['%'] = &p_imm10csr; t['&'] = &p_imm10csrw;
-    t['-'] = &bs;         t['+'] = &rcon;
-    // Memory addresses
-    t['o'] = &load_address;  t['q'] = &store_address;  t['('] = &base_only_address;
-    // Special
-    t['E'] = &csr;   t['m'] = &rm;     t['I'] = &iorw;   t['0'] = &x0;
-    t['k'] = &vm;    t['K'] = &v0;     t['W'] = &v_vtype;
-    t['p'] = &branch_target;  t['a'] = &jump_target;
-    // RVC
-    t['e'] = &rvc_rs1;    t['f'] = &rvc_rs2;    t['F'] = &rvc_fp_rs2;
-    t['H'] = &rvc_rs1s;   t['J'] = &rvc_rs2s;   t['#'] = &rvc_fp_rs2s;
-    t['N'] = &rvc_sp;     t['X'] = &rvc_ra;     t['Y'] = &rvc_t0;
-    t['V'] = &rvc_r1s;    t['O'] = &rvc_r2s;
-    t['i'] = &rvc_imm;    t['n'] = &rvc_addi4spn_imm;  t['x'] = &rvc_addi16sp_imm;
-    t['l'] = &rvc_lwsp_imm;  t['h'] = &rvc_shamt;  t['b'] = &rvc_uimm;
-    t['@'] = &rvc_lwsp_address;  t['M'] = &rvc_ldsp_address;
-    t['_'] = &rvc_swsp_address;  t['g'] = &rvc_sdsp_address;
-    t['c'] = &rvc_lw_address;    t['v'] = &rvc_ld_address;
-    t['y'] = &rvc_branch_target; t['w'] = &rvc_jump_target;
-    t['1'] = &rvcm_jt_index;
-    t['!'] = &rvcm_pushpop_rlist;
-    t['2'] = &rvcm_push_stack_adj_32;  t['4'] = &rvcm_push_stack_adj_64;
-    t['3'] = &rvcm_pop_stack_adj_32;   t['8'] = &rvcm_pop_stack_adj_64;
-    t['*'] = &rvb_b_address;  t['/'] = &rvb_h_address;
+    for (const auto& e : fmt_chars) {
+      assert(t[(uint8_t)e.code] == nullptr && "duplicate format character");
+      t[(uint8_t)e.code] = e.arg;
+    }
     return t;
   }();
-  return static_cast<unsigned char>(c) < 128 ? table[static_cast<unsigned char>(c)] : nullptr;
+  return static_cast<unsigned char>(c) < 128 ? lut[static_cast<unsigned char>(c)] : nullptr;
 }
 
 static std::vector<const arg_t *> parse_fmt(const char *fmt)
