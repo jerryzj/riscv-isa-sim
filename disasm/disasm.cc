@@ -912,6 +912,20 @@ static std::vector<const arg_t *> parse_fmt(const char *fmt)
   return args;
 }
 
+// Register-field match constants: encode a specific register number into a field.
+static constexpr uint32_t MATCH_RD_RA  = 1U << 7;   // rd = x1 (ra)
+static constexpr uint32_t MATCH_RS1_RA = 1U << 15;  // rs1 = x1 (ra)
+
+// Field mask constants (like binutils MASK_RS2 defined in riscv-opc.c).
+// Used in all_insns[] to add extra match constraints for pseudo-instructions.
+static constexpr uint32_t MASK_RD  = 0x1fU << 7;    // bits 11:7  (rd field)
+static constexpr uint32_t MASK_RS1 = 0x1fU << 15;   // bits 19:15 (rs1 field)
+static constexpr uint32_t MASK_RS2 = 0x1fU << 20;   // bits 24:20 (rs2 field)
+static constexpr uint32_t MASK_IMM = 0xfffU << 20;  // bits 31:20 (I-type imm)
+// Compressed instruction field masks
+static constexpr uint32_t MASK_CRS2    = 0x1fU << 2;             // bits 6:2
+static constexpr uint32_t MASK_CNZIMM6 = MASK_CRS2 | (1U << 12); // nzimm6 field
+
 // C++20: import insn_class enumerators into file scope for the table below
 using enum insn_class;
 
@@ -951,18 +965,18 @@ static const disasm_opcode_t all_insns[] = {
   // zicfilp_insns
   {"lpad", MATCH_LPAD, MASK_LPAD, "u", zicfilp},
   // jump_insns
-  {"j",    MATCH_JAL,              MASK_JAL | 0xf80u,             "a", always},
-  {"jal",  MATCH_JAL | 0x80u,     MASK_JAL | 0xf80u,             "a", always},
+  {"j",    MATCH_JAL,              MASK_JAL | MASK_RD,             "a", always},
+  {"jal",  MATCH_JAL | MATCH_RD_RA,     MASK_JAL | MASK_RD,             "a", always},
   {"jal",  MATCH_JAL,             MASK_JAL,                       "da", always},
-  {"ret",  MATCH_JALR | 0x8000u,  MASK_JALR | 0xf80u | 0xf8000u | 0xfff00000u, "", always},
-  {"jr",   MATCH_JALR,            MASK_JALR | 0xf80u | 0xfff00000u, "s", always},
-  {"jalr", MATCH_JALR | 0x80u,   MASK_JALR | 0xf80u | 0xfff00000u, "s", always},
+  {"ret",  MATCH_JALR | MATCH_RS1_RA,  MASK_JALR | MASK_RD | MASK_RS1 | MASK_IMM, "", always},
+  {"jr",   MATCH_JALR,            MASK_JALR | MASK_RD | MASK_IMM, "s", always},
+  {"jalr", MATCH_JALR | MATCH_RD_RA,   MASK_JALR | MASK_RD | MASK_IMM, "s", always},
   {"jalr", MATCH_JALR,            MASK_JALR,                        "dsj", always},
   // branch_insns
-  {"beqz", MATCH_BEQ, MASK_BEQ | 0x1f00000u, "sp", always},
-  {"bnez", MATCH_BNE, MASK_BNE | 0x1f00000u, "sp", always},
-  {"bltz", MATCH_BLT, MASK_BLT | 0x1f00000u, "sp", always},
-  {"bgez", MATCH_BGE, MASK_BGE | 0x1f00000u, "sp", always},
+  {"beqz", MATCH_BEQ, MASK_BEQ | MASK_RS2, "sp", always},
+  {"bnez", MATCH_BNE, MASK_BNE | MASK_RS2, "sp", always},
+  {"bltz", MATCH_BLT, MASK_BLT | MASK_RS2, "sp", always},
+  {"bgez", MATCH_BGE, MASK_BGE | MASK_RS2, "sp", always},
   {"beq",  MATCH_BEQ, MASK_BEQ,  "stp", always},
   {"bne",  MATCH_BNE, MASK_BNE,  "stp", always},
   {"blt",  MATCH_BLT, MASK_BLT,  "stp", always},
@@ -974,18 +988,18 @@ static const disasm_opcode_t all_insns[] = {
   {"auipc", MATCH_AUIPC, MASK_AUIPC, "du", always},
   // base_int_insns
   // nop: addi x0,x0,0
-  {"nop",  MATCH_ADDI, MASK_ADDI | 0xf80u | 0xf8000u | 0xfff00000u, "", always},
+  {"nop",  MATCH_ADDI, MASK_ADDI | MASK_RD | MASK_RS1 | MASK_IMM, "", always},
   // li: addi rd, x0, imm  (mask_rs1 = 0xf8000 locks rs1=0)
-  {"li",   MATCH_ADDI, MASK_ADDI | 0xf8000u, "dj", always},
+  {"li",   MATCH_ADDI, MASK_ADDI | MASK_RS1, "dj", always},
   // mv: addi rd, rs1, 0  (mask_imm locks imm=0)
-  {"mv",   MATCH_ADDI, MASK_ADDI | 0xfff00000u, "ds", always},
+  {"mv",   MATCH_ADDI, MASK_ADDI | MASK_IMM, "ds", always},
   {"addi", MATCH_ADDI, MASK_ADDI, "dsj", always},
   {"slti", MATCH_SLTI, MASK_SLTI, "dsj", always},
   // seqz: sltiu rd, rs1, 1
-  {"seqz", MATCH_SLTIU | (1u << 20), MASK_SLTIU | 0xfff00000u, "ds", always},
+  {"seqz", MATCH_SLTIU | (1u << 20), MASK_SLTIU | MASK_IMM, "ds", always},
   {"sltiu", MATCH_SLTIU, MASK_SLTIU, "dsj", always},
   // not: xori rd, rs1, -1  (imm=0xfff=-1)
-  {"not",  MATCH_XORI | 0xfff00000u, MASK_XORI | 0xfff00000u, "ds", always},
+  {"not",  MATCH_XORI | MASK_IMM, MASK_XORI | MASK_IMM, "ds", always},
   {"xori", MATCH_XORI, MASK_XORI, "dsj", always},
   {"slli", MATCH_SLLI, MASK_SLLI, "dsZ", always},
   {"srli", MATCH_SRLI, MASK_SRLI, "dsZ", always},
@@ -997,7 +1011,7 @@ static const disasm_opcode_t all_insns[] = {
   {"sll",  MATCH_SLL,  MASK_SLL,  "dst", always},
   {"slt",  MATCH_SLT,  MASK_SLT,  "dst", always},
   // snez: sltu rd, x0, rs2  (mask_rs1 locks rs1=0)
-  {"snez", MATCH_SLTU, MASK_SLTU | 0xf8000u, "dt", always},
+  {"snez", MATCH_SLTU, MASK_SLTU | MASK_RS1, "dt", always},
   {"sltu", MATCH_SLTU, MASK_SLTU, "dst", always},
   {"xor",  MATCH_XOR,  MASK_XOR,  "dst", always},
   {"srl",  MATCH_SRL,  MASK_SRL,  "dst", always},
@@ -1006,7 +1020,7 @@ static const disasm_opcode_t all_insns[] = {
   {"and",  MATCH_AND,  MASK_AND,  "dst", always},
   // rv64_int_insns
   // sext.w: addiw rd, rs1, 0
-  {"sext.w", MATCH_ADDIW, MASK_ADDIW | 0xfff00000u, "ds", rv64},
+  {"sext.w", MATCH_ADDIW, MASK_ADDIW | MASK_IMM, "ds", rv64},
   {"addiw",  MATCH_ADDIW, MASK_ADDIW, "dsj", rv64},
   {"slliw",  MATCH_SLLIW, MASK_SLLIW, "dsZ", rv64},
   {"srliw",  MATCH_SRLIW, MASK_SRLIW, "dsZ", rv64},
@@ -1025,13 +1039,13 @@ static const disasm_opcode_t all_insns[] = {
   {"fence",   MATCH_FENCE,   MASK_FENCE,   "I", always},
   {"fence.i", MATCH_FENCE_I, MASK_FENCE_I, "", always},
   // CSR pseudo-instructions (more specific masks first)
-  {"csrr",  MATCH_CSRRS,  MASK_CSRRS  | 0xf8000u,    "dE", always},
-  {"csrw",  MATCH_CSRRW,  MASK_CSRRW  | 0xf80u,      "Es", always},
-  {"csrs",  MATCH_CSRRS,  MASK_CSRRS  | 0xf80u,      "Es", always},
-  {"csrc",  MATCH_CSRRC,  MASK_CSRRC  | 0xf80u,      "Es", always},
-  {"csrwi", MATCH_CSRRWI, MASK_CSRRWI | 0xf80u,      "Ez", always},
-  {"csrsi", MATCH_CSRRSI, MASK_CSRRSI | 0xf80u,      "Ez", always},
-  {"csrci", MATCH_CSRRCI, MASK_CSRRCI | 0xf80u,      "Ez", always},
+  {"csrr",  MATCH_CSRRS,  MASK_CSRRS  | MASK_RS1,    "dE", always},
+  {"csrw",  MATCH_CSRRW,  MASK_CSRRW  | MASK_RD,      "Es", always},
+  {"csrs",  MATCH_CSRRS,  MASK_CSRRS  | MASK_RD,      "Es", always},
+  {"csrc",  MATCH_CSRRC,  MASK_CSRRC  | MASK_RD,      "Es", always},
+  {"csrwi", MATCH_CSRRWI, MASK_CSRRWI | MASK_RD,      "Ez", always},
+  {"csrsi", MATCH_CSRRSI, MASK_CSRRSI | MASK_RD,      "Ez", always},
+  {"csrci", MATCH_CSRRCI, MASK_CSRRCI | MASK_RD,      "Ez", always},
   {"csrrw",  MATCH_CSRRW,  MASK_CSRRW,  "dEs", always},
   {"csrrs",  MATCH_CSRRS,  MASK_CSRRS,  "dEs", always},
   {"csrrc",  MATCH_CSRRC,  MASK_CSRRC,  "dEs", always},
@@ -1063,7 +1077,7 @@ static const disasm_opcode_t all_insns[] = {
   // zba64_insns
   {"slli.uw", MATCH_SLLI_UW, MASK_SLLI_UW, "dsZ", zba_rv64},
   // zext.w: add.uw rd, rs1, zero  (mask_rs2 locks rs2=0)
-  {"zext.w",  MATCH_ADD_UW, MASK_ADD_UW | 0x1f00000u, "ds", zba_rv64},
+  {"zext.w",  MATCH_ADD_UW, MASK_ADD_UW | MASK_RS2, "ds", zba_rv64},
   {"add.uw",  MATCH_ADD_UW,  MASK_ADD_UW,  "dst", zba_rv64},
   {"sh1add.uw", MATCH_SH1ADD_UW, MASK_SH1ADD_UW, "dst", zba_rv64},
   {"sh2add.uw", MATCH_SH2ADD_UW, MASK_SH2ADD_UW, "dst", zba_rv64},
@@ -1354,12 +1368,12 @@ static const disasm_opcode_t all_insns[] = {
   {"hfence.gvma", MATCH_HFENCE_GVMA, MASK_HFENCE_GVMA, "st", ext_h},
   {"hfence.vvma", MATCH_HFENCE_VVMA, MASK_HFENCE_VVMA, "st", ext_h},
   // zca_insns
-  {"c.ebreak",   MATCH_C_ADD,  MASK_C_ADD | 0xf80u | 0x7cu,         "", zca},
-  {"ret",        MATCH_C_JR  | 0x80u, MASK_C_JR | 0xf80u | 0x107cu, "", zca},
-  {"c.jr",       MATCH_C_JR,   MASK_C_JR  | 0x107cu,                "e", zca},
-  {"c.jalr",     MATCH_C_JALR, MASK_C_JALR | 0x107cu,               "e", zca},
-  {"c.nop",      MATCH_C_ADDI, MASK_C_ADDI | 0xf80u | 0x107cu,      "", zca},
-  {"c.addi16sp", MATCH_C_ADDI16SP, MASK_C_ADDI16SP | 0xf80u,        "Nx", zca},
+  {"c.ebreak",   MATCH_C_ADD,  MASK_C_ADD | MASK_RD | MASK_CRS2,         "", zca},
+  {"ret",        MATCH_C_JR  | 0x80u, MASK_C_JR | MASK_RD | MASK_CNZIMM6, "", zca},
+  {"c.jr",       MATCH_C_JR,   MASK_C_JR  | MASK_CNZIMM6,                "e", zca},
+  {"c.jalr",     MATCH_C_JALR, MASK_C_JALR | MASK_CNZIMM6,               "e", zca},
+  {"c.nop",      MATCH_C_ADDI, MASK_C_ADDI | MASK_RD | MASK_CNZIMM6,      "", zca},
+  {"c.addi16sp", MATCH_C_ADDI16SP, MASK_C_ADDI16SP | MASK_RD,        "Nx", zca},
   {"c.addi4spn", MATCH_C_ADDI4SPN, MASK_C_ADDI4SPN,                 "JNn", zca},
   {"c.li",       MATCH_C_LI,   MASK_C_LI,   "di", zca},
   {"c.lui",      MATCH_C_LUI,  MASK_C_LUI,  "db", zca},
