@@ -636,20 +636,6 @@ std::string disassembler_t::disassemble(insn_t insn) const
 }
 
 
-static void NOINLINE add_xamo_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  const char *suffix[] = {"", ".rl", ".aq", ".aqrl"};
-  char new_name[128];
-  uint32_t new_mask = mask | (0x3 << 25);
-  uint32_t new_match;
-
-  for (uint32_t idx = 0; idx < sizeof(suffix) / sizeof(suffix[0]); ++idx) {
-    snprintf(new_name, sizeof(new_name), "%s%s", name, suffix[idx]);
-    new_match = match | (idx << 25);
-
-    d->add_insn(new disasm_insn_t(new_name, new_match, new_mask, {&xrd, &xrs2, &base_only_address}));
-  }
-}
 
 static void NOINLINE add_unknown_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
 {
@@ -731,7 +717,13 @@ enum class insn_class : uint8_t {
   zknh,             zknh_rv64,   zknh_rv32,
   zksed,            zksh,
   zalasr,
+  zaamo,            // EXT_ZAAMO
+  zaamo_rv64,       // EXT_ZAAMO + rv64
+  zacas,            // EXT_ZACAS (amocas.w/d, any xlen)
+  zabha,            // EXT_ZABHA
+  zimop,            // EXT_ZIMOP
   zicfiss,
+  zicfiss_rv64,     // EXT_ZICFISS + rv64 (for ssamoswap.d)
   zicfiss_zca,      // EXT_ZICFISS + EXT_ZCA
   ext_p,
   ext_p_rv32,       // EXT_P + xlen_strict==32
@@ -816,6 +808,12 @@ static bool insn_class_enabled(insn_class cls, const isa_parser_t *isa, bool s)
     case ic::zkne_rv64:       return ext(EXT_ZKNE)    && xv(64);
     case ic::zknd_rv32:       return ext(EXT_ZKND)    && xv(32);
     case ic::zkne_rv32:       return ext(EXT_ZKNE)    && xv(32);
+    case ic::zaamo:           return ext(EXT_ZAAMO);
+    case ic::zaamo_rv64:      return ext(EXT_ZAAMO)    && xv(64);
+    case ic::zacas:           return ext(EXT_ZACAS);
+    case ic::zabha:           return ext(EXT_ZABHA);
+    case ic::zimop:           return ext(EXT_ZIMOP);
+    case ic::zicfiss_rv64:    return ext(EXT_ZICFISS)  && xv(64);
     case ic::zknh:            return ext(EXT_ZKNH);
     case ic::zknh_rv64:       return ext(EXT_ZKNH)    && xv(64);
     case ic::zknh_rv32:       return ext(EXT_ZKNH)    && xv(32);
@@ -2091,6 +2089,247 @@ static const disasm_opcode_t all_insns[] = {
   {"psslai.w", MATCH_PSSLAI_W, MASK_PSSLAI_W, "ds<", ext_p_rv64},
   {"pli.w", MATCH_PLI_W, MASK_PLI_W, "d$", ext_p_rv64},
   {"plui.w", MATCH_PLUI_W, MASK_PLUI_W, "d%", ext_p_rv64},
+
+  // AMO instructions (4 variants: base/.rl/.aq/.aqrl)
+  // zaamo
+  {"amoadd_w", MATCH_AMOADD_W, MASK_AMOADD_W | (3<<25), "dt(", zaamo},
+  {"amoadd_w_rl", MATCH_AMOADD_W | (1<<25), MASK_AMOADD_W | (3<<25), "dt(", zaamo},
+  {"amoadd_w_aq", MATCH_AMOADD_W | (2<<25), MASK_AMOADD_W | (3<<25), "dt(", zaamo},
+  {"amoadd_w_aqrl", MATCH_AMOADD_W | (3<<25), MASK_AMOADD_W | (3<<25), "dt(", zaamo},
+  {"amoswap_w", MATCH_AMOSWAP_W, MASK_AMOSWAP_W | (3<<25), "dt(", zaamo},
+  {"amoswap_w_rl", MATCH_AMOSWAP_W | (1<<25), MASK_AMOSWAP_W | (3<<25), "dt(", zaamo},
+  {"amoswap_w_aq", MATCH_AMOSWAP_W | (2<<25), MASK_AMOSWAP_W | (3<<25), "dt(", zaamo},
+  {"amoswap_w_aqrl", MATCH_AMOSWAP_W | (3<<25), MASK_AMOSWAP_W | (3<<25), "dt(", zaamo},
+  {"amoand_w", MATCH_AMOAND_W, MASK_AMOAND_W | (3<<25), "dt(", zaamo},
+  {"amoand_w_rl", MATCH_AMOAND_W | (1<<25), MASK_AMOAND_W | (3<<25), "dt(", zaamo},
+  {"amoand_w_aq", MATCH_AMOAND_W | (2<<25), MASK_AMOAND_W | (3<<25), "dt(", zaamo},
+  {"amoand_w_aqrl", MATCH_AMOAND_W | (3<<25), MASK_AMOAND_W | (3<<25), "dt(", zaamo},
+  {"amoor_w", MATCH_AMOOR_W, MASK_AMOOR_W | (3<<25), "dt(", zaamo},
+  {"amoor_w_rl", MATCH_AMOOR_W | (1<<25), MASK_AMOOR_W | (3<<25), "dt(", zaamo},
+  {"amoor_w_aq", MATCH_AMOOR_W | (2<<25), MASK_AMOOR_W | (3<<25), "dt(", zaamo},
+  {"amoor_w_aqrl", MATCH_AMOOR_W | (3<<25), MASK_AMOOR_W | (3<<25), "dt(", zaamo},
+  {"amoxor_w", MATCH_AMOXOR_W, MASK_AMOXOR_W | (3<<25), "dt(", zaamo},
+  {"amoxor_w_rl", MATCH_AMOXOR_W | (1<<25), MASK_AMOXOR_W | (3<<25), "dt(", zaamo},
+  {"amoxor_w_aq", MATCH_AMOXOR_W | (2<<25), MASK_AMOXOR_W | (3<<25), "dt(", zaamo},
+  {"amoxor_w_aqrl", MATCH_AMOXOR_W | (3<<25), MASK_AMOXOR_W | (3<<25), "dt(", zaamo},
+  {"amomin_w", MATCH_AMOMIN_W, MASK_AMOMIN_W | (3<<25), "dt(", zaamo},
+  {"amomin_w_rl", MATCH_AMOMIN_W | (1<<25), MASK_AMOMIN_W | (3<<25), "dt(", zaamo},
+  {"amomin_w_aq", MATCH_AMOMIN_W | (2<<25), MASK_AMOMIN_W | (3<<25), "dt(", zaamo},
+  {"amomin_w_aqrl", MATCH_AMOMIN_W | (3<<25), MASK_AMOMIN_W | (3<<25), "dt(", zaamo},
+  {"amomax_w", MATCH_AMOMAX_W, MASK_AMOMAX_W | (3<<25), "dt(", zaamo},
+  {"amomax_w_rl", MATCH_AMOMAX_W | (1<<25), MASK_AMOMAX_W | (3<<25), "dt(", zaamo},
+  {"amomax_w_aq", MATCH_AMOMAX_W | (2<<25), MASK_AMOMAX_W | (3<<25), "dt(", zaamo},
+  {"amomax_w_aqrl", MATCH_AMOMAX_W | (3<<25), MASK_AMOMAX_W | (3<<25), "dt(", zaamo},
+  {"amominu_w", MATCH_AMOMINU_W, MASK_AMOMINU_W | (3<<25), "dt(", zaamo},
+  {"amominu_w_rl", MATCH_AMOMINU_W | (1<<25), MASK_AMOMINU_W | (3<<25), "dt(", zaamo},
+  {"amominu_w_aq", MATCH_AMOMINU_W | (2<<25), MASK_AMOMINU_W | (3<<25), "dt(", zaamo},
+  {"amominu_w_aqrl", MATCH_AMOMINU_W | (3<<25), MASK_AMOMINU_W | (3<<25), "dt(", zaamo},
+  {"amomaxu_w", MATCH_AMOMAXU_W, MASK_AMOMAXU_W | (3<<25), "dt(", zaamo},
+  {"amomaxu_w_rl", MATCH_AMOMAXU_W | (1<<25), MASK_AMOMAXU_W | (3<<25), "dt(", zaamo},
+  {"amomaxu_w_aq", MATCH_AMOMAXU_W | (2<<25), MASK_AMOMAXU_W | (3<<25), "dt(", zaamo},
+  {"amomaxu_w_aqrl", MATCH_AMOMAXU_W | (3<<25), MASK_AMOMAXU_W | (3<<25), "dt(", zaamo},
+  // zaamo rv64
+  {"amoadd_d", MATCH_AMOADD_D, MASK_AMOADD_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoadd_d_rl", MATCH_AMOADD_D | (1<<25), MASK_AMOADD_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoadd_d_aq", MATCH_AMOADD_D | (2<<25), MASK_AMOADD_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoadd_d_aqrl", MATCH_AMOADD_D | (3<<25), MASK_AMOADD_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoswap_d", MATCH_AMOSWAP_D, MASK_AMOSWAP_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoswap_d_rl", MATCH_AMOSWAP_D | (1<<25), MASK_AMOSWAP_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoswap_d_aq", MATCH_AMOSWAP_D | (2<<25), MASK_AMOSWAP_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoswap_d_aqrl", MATCH_AMOSWAP_D | (3<<25), MASK_AMOSWAP_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoand_d", MATCH_AMOAND_D, MASK_AMOAND_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoand_d_rl", MATCH_AMOAND_D | (1<<25), MASK_AMOAND_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoand_d_aq", MATCH_AMOAND_D | (2<<25), MASK_AMOAND_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoand_d_aqrl", MATCH_AMOAND_D | (3<<25), MASK_AMOAND_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoor_d", MATCH_AMOOR_D, MASK_AMOOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoor_d_rl", MATCH_AMOOR_D | (1<<25), MASK_AMOOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoor_d_aq", MATCH_AMOOR_D | (2<<25), MASK_AMOOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoor_d_aqrl", MATCH_AMOOR_D | (3<<25), MASK_AMOOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoxor_d", MATCH_AMOXOR_D, MASK_AMOXOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoxor_d_rl", MATCH_AMOXOR_D | (1<<25), MASK_AMOXOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoxor_d_aq", MATCH_AMOXOR_D | (2<<25), MASK_AMOXOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amoxor_d_aqrl", MATCH_AMOXOR_D | (3<<25), MASK_AMOXOR_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomin_d", MATCH_AMOMIN_D, MASK_AMOMIN_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomin_d_rl", MATCH_AMOMIN_D | (1<<25), MASK_AMOMIN_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomin_d_aq", MATCH_AMOMIN_D | (2<<25), MASK_AMOMIN_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomin_d_aqrl", MATCH_AMOMIN_D | (3<<25), MASK_AMOMIN_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomax_d", MATCH_AMOMAX_D, MASK_AMOMAX_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomax_d_rl", MATCH_AMOMAX_D | (1<<25), MASK_AMOMAX_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomax_d_aq", MATCH_AMOMAX_D | (2<<25), MASK_AMOMAX_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomax_d_aqrl", MATCH_AMOMAX_D | (3<<25), MASK_AMOMAX_D | (3<<25), "dt(", zaamo_rv64},
+  {"amominu_d", MATCH_AMOMINU_D, MASK_AMOMINU_D | (3<<25), "dt(", zaamo_rv64},
+  {"amominu_d_rl", MATCH_AMOMINU_D | (1<<25), MASK_AMOMINU_D | (3<<25), "dt(", zaamo_rv64},
+  {"amominu_d_aq", MATCH_AMOMINU_D | (2<<25), MASK_AMOMINU_D | (3<<25), "dt(", zaamo_rv64},
+  {"amominu_d_aqrl", MATCH_AMOMINU_D | (3<<25), MASK_AMOMINU_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomaxu_d", MATCH_AMOMAXU_D, MASK_AMOMAXU_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomaxu_d_rl", MATCH_AMOMAXU_D | (1<<25), MASK_AMOMAXU_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomaxu_d_aq", MATCH_AMOMAXU_D | (2<<25), MASK_AMOMAXU_D | (3<<25), "dt(", zaamo_rv64},
+  {"amomaxu_d_aqrl", MATCH_AMOMAXU_D | (3<<25), MASK_AMOMAXU_D | (3<<25), "dt(", zaamo_rv64},
+  // zalrsc
+  {"lr_w", MATCH_LR_W, MASK_LR_W | (3<<25), "d(", zalrsc},
+  {"lr_w_rl", MATCH_LR_W | (1<<25), MASK_LR_W | (3<<25), "d(", zalrsc},
+  {"lr_w_aq", MATCH_LR_W | (2<<25), MASK_LR_W | (3<<25), "d(", zalrsc},
+  {"lr_w_aqrl", MATCH_LR_W | (3<<25), MASK_LR_W | (3<<25), "d(", zalrsc},
+  {"sc_w", MATCH_SC_W, MASK_SC_W | (3<<25), "dt(", zalrsc},
+  {"sc_w_rl", MATCH_SC_W | (1<<25), MASK_SC_W | (3<<25), "dt(", zalrsc},
+  {"sc_w_aq", MATCH_SC_W | (2<<25), MASK_SC_W | (3<<25), "dt(", zalrsc},
+  {"sc_w_aqrl", MATCH_SC_W | (3<<25), MASK_SC_W | (3<<25), "dt(", zalrsc},
+  // zalrsc rv64
+  {"lr_d", MATCH_LR_D, MASK_LR_D | (3<<25), "d(", zalrsc_rv64},
+  {"lr_d_rl", MATCH_LR_D | (1<<25), MASK_LR_D | (3<<25), "d(", zalrsc_rv64},
+  {"lr_d_aq", MATCH_LR_D | (2<<25), MASK_LR_D | (3<<25), "d(", zalrsc_rv64},
+  {"lr_d_aqrl", MATCH_LR_D | (3<<25), MASK_LR_D | (3<<25), "d(", zalrsc_rv64},
+  {"sc_d", MATCH_SC_D, MASK_SC_D | (3<<25), "dt(", zalrsc_rv64},
+  {"sc_d_rl", MATCH_SC_D | (1<<25), MASK_SC_D | (3<<25), "dt(", zalrsc_rv64},
+  {"sc_d_aq", MATCH_SC_D | (2<<25), MASK_SC_D | (3<<25), "dt(", zalrsc_rv64},
+  {"sc_d_aqrl", MATCH_SC_D | (3<<25), MASK_SC_D | (3<<25), "dt(", zalrsc_rv64},
+  // zacas
+  {"amocas_w", MATCH_AMOCAS_W, MASK_AMOCAS_W | (3<<25), "dt(", zacas},
+  {"amocas_w_rl", MATCH_AMOCAS_W | (1<<25), MASK_AMOCAS_W | (3<<25), "dt(", zacas},
+  {"amocas_w_aq", MATCH_AMOCAS_W | (2<<25), MASK_AMOCAS_W | (3<<25), "dt(", zacas},
+  {"amocas_w_aqrl", MATCH_AMOCAS_W | (3<<25), MASK_AMOCAS_W | (3<<25), "dt(", zacas},
+  {"amocas_d", MATCH_AMOCAS_D, MASK_AMOCAS_D | (3<<25), "dt(", zacas},
+  {"amocas_d_rl", MATCH_AMOCAS_D | (1<<25), MASK_AMOCAS_D | (3<<25), "dt(", zacas},
+  {"amocas_d_aq", MATCH_AMOCAS_D | (2<<25), MASK_AMOCAS_D | (3<<25), "dt(", zacas},
+  {"amocas_d_aqrl", MATCH_AMOCAS_D | (3<<25), MASK_AMOCAS_D | (3<<25), "dt(", zacas},
+  {"amocas_q", MATCH_AMOCAS_Q, MASK_AMOCAS_Q | (3<<25), "dt(", zacas_rv64},
+  {"amocas_q_rl", MATCH_AMOCAS_Q | (1<<25), MASK_AMOCAS_Q | (3<<25), "dt(", zacas_rv64},
+  {"amocas_q_aq", MATCH_AMOCAS_Q | (2<<25), MASK_AMOCAS_Q | (3<<25), "dt(", zacas_rv64},
+  {"amocas_q_aqrl", MATCH_AMOCAS_Q | (3<<25), MASK_AMOCAS_Q | (3<<25), "dt(", zacas_rv64},
+  // zabha
+  {"amoadd_b", MATCH_AMOADD_B, MASK_AMOADD_B | (3<<25), "dt(", zabha},
+  {"amoadd_b_rl", MATCH_AMOADD_B | (1<<25), MASK_AMOADD_B | (3<<25), "dt(", zabha},
+  {"amoadd_b_aq", MATCH_AMOADD_B | (2<<25), MASK_AMOADD_B | (3<<25), "dt(", zabha},
+  {"amoadd_b_aqrl", MATCH_AMOADD_B | (3<<25), MASK_AMOADD_B | (3<<25), "dt(", zabha},
+  {"amoswap_b", MATCH_AMOSWAP_B, MASK_AMOSWAP_B | (3<<25), "dt(", zabha},
+  {"amoswap_b_rl", MATCH_AMOSWAP_B | (1<<25), MASK_AMOSWAP_B | (3<<25), "dt(", zabha},
+  {"amoswap_b_aq", MATCH_AMOSWAP_B | (2<<25), MASK_AMOSWAP_B | (3<<25), "dt(", zabha},
+  {"amoswap_b_aqrl", MATCH_AMOSWAP_B | (3<<25), MASK_AMOSWAP_B | (3<<25), "dt(", zabha},
+  {"amoand_b", MATCH_AMOAND_B, MASK_AMOAND_B | (3<<25), "dt(", zabha},
+  {"amoand_b_rl", MATCH_AMOAND_B | (1<<25), MASK_AMOAND_B | (3<<25), "dt(", zabha},
+  {"amoand_b_aq", MATCH_AMOAND_B | (2<<25), MASK_AMOAND_B | (3<<25), "dt(", zabha},
+  {"amoand_b_aqrl", MATCH_AMOAND_B | (3<<25), MASK_AMOAND_B | (3<<25), "dt(", zabha},
+  {"amoor_b", MATCH_AMOOR_B, MASK_AMOOR_B | (3<<25), "dt(", zabha},
+  {"amoor_b_rl", MATCH_AMOOR_B | (1<<25), MASK_AMOOR_B | (3<<25), "dt(", zabha},
+  {"amoor_b_aq", MATCH_AMOOR_B | (2<<25), MASK_AMOOR_B | (3<<25), "dt(", zabha},
+  {"amoor_b_aqrl", MATCH_AMOOR_B | (3<<25), MASK_AMOOR_B | (3<<25), "dt(", zabha},
+  {"amoxor_b", MATCH_AMOXOR_B, MASK_AMOXOR_B | (3<<25), "dt(", zabha},
+  {"amoxor_b_rl", MATCH_AMOXOR_B | (1<<25), MASK_AMOXOR_B | (3<<25), "dt(", zabha},
+  {"amoxor_b_aq", MATCH_AMOXOR_B | (2<<25), MASK_AMOXOR_B | (3<<25), "dt(", zabha},
+  {"amoxor_b_aqrl", MATCH_AMOXOR_B | (3<<25), MASK_AMOXOR_B | (3<<25), "dt(", zabha},
+  {"amomin_b", MATCH_AMOMIN_B, MASK_AMOMIN_B | (3<<25), "dt(", zabha},
+  {"amomin_b_rl", MATCH_AMOMIN_B | (1<<25), MASK_AMOMIN_B | (3<<25), "dt(", zabha},
+  {"amomin_b_aq", MATCH_AMOMIN_B | (2<<25), MASK_AMOMIN_B | (3<<25), "dt(", zabha},
+  {"amomin_b_aqrl", MATCH_AMOMIN_B | (3<<25), MASK_AMOMIN_B | (3<<25), "dt(", zabha},
+  {"amomax_b", MATCH_AMOMAX_B, MASK_AMOMAX_B | (3<<25), "dt(", zabha},
+  {"amomax_b_rl", MATCH_AMOMAX_B | (1<<25), MASK_AMOMAX_B | (3<<25), "dt(", zabha},
+  {"amomax_b_aq", MATCH_AMOMAX_B | (2<<25), MASK_AMOMAX_B | (3<<25), "dt(", zabha},
+  {"amomax_b_aqrl", MATCH_AMOMAX_B | (3<<25), MASK_AMOMAX_B | (3<<25), "dt(", zabha},
+  {"amominu_b", MATCH_AMOMINU_B, MASK_AMOMINU_B | (3<<25), "dt(", zabha},
+  {"amominu_b_rl", MATCH_AMOMINU_B | (1<<25), MASK_AMOMINU_B | (3<<25), "dt(", zabha},
+  {"amominu_b_aq", MATCH_AMOMINU_B | (2<<25), MASK_AMOMINU_B | (3<<25), "dt(", zabha},
+  {"amominu_b_aqrl", MATCH_AMOMINU_B | (3<<25), MASK_AMOMINU_B | (3<<25), "dt(", zabha},
+  {"amomaxu_b", MATCH_AMOMAXU_B, MASK_AMOMAXU_B | (3<<25), "dt(", zabha},
+  {"amomaxu_b_rl", MATCH_AMOMAXU_B | (1<<25), MASK_AMOMAXU_B | (3<<25), "dt(", zabha},
+  {"amomaxu_b_aq", MATCH_AMOMAXU_B | (2<<25), MASK_AMOMAXU_B | (3<<25), "dt(", zabha},
+  {"amomaxu_b_aqrl", MATCH_AMOMAXU_B | (3<<25), MASK_AMOMAXU_B | (3<<25), "dt(", zabha},
+  {"amocas_b", MATCH_AMOCAS_B, MASK_AMOCAS_B | (3<<25), "dt(", zabha},
+  {"amocas_b_rl", MATCH_AMOCAS_B | (1<<25), MASK_AMOCAS_B | (3<<25), "dt(", zabha},
+  {"amocas_b_aq", MATCH_AMOCAS_B | (2<<25), MASK_AMOCAS_B | (3<<25), "dt(", zabha},
+  {"amocas_b_aqrl", MATCH_AMOCAS_B | (3<<25), MASK_AMOCAS_B | (3<<25), "dt(", zabha},
+  {"amoadd_h", MATCH_AMOADD_H, MASK_AMOADD_H | (3<<25), "dt(", zabha},
+  {"amoadd_h_rl", MATCH_AMOADD_H | (1<<25), MASK_AMOADD_H | (3<<25), "dt(", zabha},
+  {"amoadd_h_aq", MATCH_AMOADD_H | (2<<25), MASK_AMOADD_H | (3<<25), "dt(", zabha},
+  {"amoadd_h_aqrl", MATCH_AMOADD_H | (3<<25), MASK_AMOADD_H | (3<<25), "dt(", zabha},
+  {"amoswap_h", MATCH_AMOSWAP_H, MASK_AMOSWAP_H | (3<<25), "dt(", zabha},
+  {"amoswap_h_rl", MATCH_AMOSWAP_H | (1<<25), MASK_AMOSWAP_H | (3<<25), "dt(", zabha},
+  {"amoswap_h_aq", MATCH_AMOSWAP_H | (2<<25), MASK_AMOSWAP_H | (3<<25), "dt(", zabha},
+  {"amoswap_h_aqrl", MATCH_AMOSWAP_H | (3<<25), MASK_AMOSWAP_H | (3<<25), "dt(", zabha},
+  {"amoand_h", MATCH_AMOAND_H, MASK_AMOAND_H | (3<<25), "dt(", zabha},
+  {"amoand_h_rl", MATCH_AMOAND_H | (1<<25), MASK_AMOAND_H | (3<<25), "dt(", zabha},
+  {"amoand_h_aq", MATCH_AMOAND_H | (2<<25), MASK_AMOAND_H | (3<<25), "dt(", zabha},
+  {"amoand_h_aqrl", MATCH_AMOAND_H | (3<<25), MASK_AMOAND_H | (3<<25), "dt(", zabha},
+  {"amoor_h", MATCH_AMOOR_H, MASK_AMOOR_H | (3<<25), "dt(", zabha},
+  {"amoor_h_rl", MATCH_AMOOR_H | (1<<25), MASK_AMOOR_H | (3<<25), "dt(", zabha},
+  {"amoor_h_aq", MATCH_AMOOR_H | (2<<25), MASK_AMOOR_H | (3<<25), "dt(", zabha},
+  {"amoor_h_aqrl", MATCH_AMOOR_H | (3<<25), MASK_AMOOR_H | (3<<25), "dt(", zabha},
+  {"amoxor_h", MATCH_AMOXOR_H, MASK_AMOXOR_H | (3<<25), "dt(", zabha},
+  {"amoxor_h_rl", MATCH_AMOXOR_H | (1<<25), MASK_AMOXOR_H | (3<<25), "dt(", zabha},
+  {"amoxor_h_aq", MATCH_AMOXOR_H | (2<<25), MASK_AMOXOR_H | (3<<25), "dt(", zabha},
+  {"amoxor_h_aqrl", MATCH_AMOXOR_H | (3<<25), MASK_AMOXOR_H | (3<<25), "dt(", zabha},
+  {"amomin_h", MATCH_AMOMIN_H, MASK_AMOMIN_H | (3<<25), "dt(", zabha},
+  {"amomin_h_rl", MATCH_AMOMIN_H | (1<<25), MASK_AMOMIN_H | (3<<25), "dt(", zabha},
+  {"amomin_h_aq", MATCH_AMOMIN_H | (2<<25), MASK_AMOMIN_H | (3<<25), "dt(", zabha},
+  {"amomin_h_aqrl", MATCH_AMOMIN_H | (3<<25), MASK_AMOMIN_H | (3<<25), "dt(", zabha},
+  {"amomax_h", MATCH_AMOMAX_H, MASK_AMOMAX_H | (3<<25), "dt(", zabha},
+  {"amomax_h_rl", MATCH_AMOMAX_H | (1<<25), MASK_AMOMAX_H | (3<<25), "dt(", zabha},
+  {"amomax_h_aq", MATCH_AMOMAX_H | (2<<25), MASK_AMOMAX_H | (3<<25), "dt(", zabha},
+  {"amomax_h_aqrl", MATCH_AMOMAX_H | (3<<25), MASK_AMOMAX_H | (3<<25), "dt(", zabha},
+  {"amominu_h", MATCH_AMOMINU_H, MASK_AMOMINU_H | (3<<25), "dt(", zabha},
+  {"amominu_h_rl", MATCH_AMOMINU_H | (1<<25), MASK_AMOMINU_H | (3<<25), "dt(", zabha},
+  {"amominu_h_aq", MATCH_AMOMINU_H | (2<<25), MASK_AMOMINU_H | (3<<25), "dt(", zabha},
+  {"amominu_h_aqrl", MATCH_AMOMINU_H | (3<<25), MASK_AMOMINU_H | (3<<25), "dt(", zabha},
+  {"amomaxu_h", MATCH_AMOMAXU_H, MASK_AMOMAXU_H | (3<<25), "dt(", zabha},
+  {"amomaxu_h_rl", MATCH_AMOMAXU_H | (1<<25), MASK_AMOMAXU_H | (3<<25), "dt(", zabha},
+  {"amomaxu_h_aq", MATCH_AMOMAXU_H | (2<<25), MASK_AMOMAXU_H | (3<<25), "dt(", zabha},
+  {"amomaxu_h_aqrl", MATCH_AMOMAXU_H | (3<<25), MASK_AMOMAXU_H | (3<<25), "dt(", zabha},
+  {"amocas_h", MATCH_AMOCAS_H, MASK_AMOCAS_H | (3<<25), "dt(", zabha},
+  {"amocas_h_rl", MATCH_AMOCAS_H | (1<<25), MASK_AMOCAS_H | (3<<25), "dt(", zabha},
+  {"amocas_h_aq", MATCH_AMOCAS_H | (2<<25), MASK_AMOCAS_H | (3<<25), "dt(", zabha},
+  {"amocas_h_aqrl", MATCH_AMOCAS_H | (3<<25), MASK_AMOCAS_H | (3<<25), "dt(", zabha},
+  // zicfiss AMO
+  {"ssamoswap_w", MATCH_SSAMOSWAP_W, MASK_SSAMOSWAP_W | (3<<25), "dt(", zicfiss},
+  {"ssamoswap_w_rl", MATCH_SSAMOSWAP_W | (1<<25), MASK_SSAMOSWAP_W | (3<<25), "dt(", zicfiss},
+  {"ssamoswap_w_aq", MATCH_SSAMOSWAP_W | (2<<25), MASK_SSAMOSWAP_W | (3<<25), "dt(", zicfiss},
+  {"ssamoswap_w_aqrl", MATCH_SSAMOSWAP_W | (3<<25), MASK_SSAMOSWAP_W | (3<<25), "dt(", zicfiss},
+  {"ssamoswap_d", MATCH_SSAMOSWAP_D, MASK_SSAMOSWAP_D | (3<<25), "dt(", zicfiss_rv64},
+  {"ssamoswap_d_rl", MATCH_SSAMOSWAP_D | (1<<25), MASK_SSAMOSWAP_D | (3<<25), "dt(", zicfiss_rv64},
+  {"ssamoswap_d_aq", MATCH_SSAMOSWAP_D | (2<<25), MASK_SSAMOSWAP_D | (3<<25), "dt(", zicfiss_rv64},
+  {"ssamoswap_d_aqrl", MATCH_SSAMOSWAP_D | (3<<25), MASK_SSAMOSWAP_D | (3<<25), "dt(", zicfiss_rv64},
+  // zimop: all mop.r/mop.rr variants as explicit rows.
+  // Zicfiss sspush/sspopchk have higher priority (earlier in table)
+  // and will correctly shadow the mop.r.28/mop.rr.7 overlapping encodings.
+  {"mop_r_0", MATCH_MOP_R_0, MASK_MOP_R_0, "ds", zimop},
+  {"mop_r_1", MATCH_MOP_R_1, MASK_MOP_R_1, "ds", zimop},
+  {"mop_r_2", MATCH_MOP_R_2, MASK_MOP_R_2, "ds", zimop},
+  {"mop_r_3", MATCH_MOP_R_3, MASK_MOP_R_3, "ds", zimop},
+  {"mop_r_4", MATCH_MOP_R_4, MASK_MOP_R_4, "ds", zimop},
+  {"mop_r_5", MATCH_MOP_R_5, MASK_MOP_R_5, "ds", zimop},
+  {"mop_r_6", MATCH_MOP_R_6, MASK_MOP_R_6, "ds", zimop},
+  {"mop_r_7", MATCH_MOP_R_7, MASK_MOP_R_7, "ds", zimop},
+  {"mop_r_8", MATCH_MOP_R_8, MASK_MOP_R_8, "ds", zimop},
+  {"mop_r_9", MATCH_MOP_R_9, MASK_MOP_R_9, "ds", zimop},
+  {"mop_r_10", MATCH_MOP_R_10, MASK_MOP_R_10, "ds", zimop},
+  {"mop_r_11", MATCH_MOP_R_11, MASK_MOP_R_11, "ds", zimop},
+  {"mop_r_12", MATCH_MOP_R_12, MASK_MOP_R_12, "ds", zimop},
+  {"mop_r_13", MATCH_MOP_R_13, MASK_MOP_R_13, "ds", zimop},
+  {"mop_r_14", MATCH_MOP_R_14, MASK_MOP_R_14, "ds", zimop},
+  {"mop_r_15", MATCH_MOP_R_15, MASK_MOP_R_15, "ds", zimop},
+  {"mop_r_16", MATCH_MOP_R_16, MASK_MOP_R_16, "ds", zimop},
+  {"mop_r_17", MATCH_MOP_R_17, MASK_MOP_R_17, "ds", zimop},
+  {"mop_r_18", MATCH_MOP_R_18, MASK_MOP_R_18, "ds", zimop},
+  {"mop_r_19", MATCH_MOP_R_19, MASK_MOP_R_19, "ds", zimop},
+  {"mop_r_20", MATCH_MOP_R_20, MASK_MOP_R_20, "ds", zimop},
+  {"mop_r_21", MATCH_MOP_R_21, MASK_MOP_R_21, "ds", zimop},
+  {"mop_r_22", MATCH_MOP_R_22, MASK_MOP_R_22, "ds", zimop},
+  {"mop_r_23", MATCH_MOP_R_23, MASK_MOP_R_23, "ds", zimop},
+  {"mop_r_24", MATCH_MOP_R_24, MASK_MOP_R_24, "ds", zimop},
+  {"mop_r_25", MATCH_MOP_R_25, MASK_MOP_R_25, "ds", zimop},
+  {"mop_r_26", MATCH_MOP_R_26, MASK_MOP_R_26, "ds", zimop},
+  {"mop_r_27", MATCH_MOP_R_27, MASK_MOP_R_27, "ds", zimop},
+  {"mop_r_28", MATCH_MOP_R_28, MASK_MOP_R_28, "ds", zimop},
+  {"mop_r_29", MATCH_MOP_R_29, MASK_MOP_R_29, "ds", zimop},
+  {"mop_r_30", MATCH_MOP_R_30, MASK_MOP_R_30, "ds", zimop},
+  {"mop_r_31", MATCH_MOP_R_31, MASK_MOP_R_31, "ds", zimop},
+  {"mop_rr_0", MATCH_MOP_RR_0, MASK_MOP_RR_0, "dst", zimop},
+  {"mop_rr_1", MATCH_MOP_RR_1, MASK_MOP_RR_1, "dst", zimop},
+  {"mop_rr_2", MATCH_MOP_RR_2, MASK_MOP_RR_2, "dst", zimop},
+  {"mop_rr_3", MATCH_MOP_RR_3, MASK_MOP_RR_3, "dst", zimop},
+  {"mop_rr_4", MATCH_MOP_RR_4, MASK_MOP_RR_4, "dst", zimop},
+  {"mop_rr_5", MATCH_MOP_RR_5, MASK_MOP_RR_5, "dst", zimop},
+  {"mop_rr_6", MATCH_MOP_RR_6, MASK_MOP_RR_6, "dst", zimop},
+  {"mop_rr_7", MATCH_MOP_RR_7, MASK_MOP_RR_7, "dst", zimop},
+
   // zcmop_insns
   {"c.mop.1",  MATCH_C_MOP_1,  MASK_C_MOP_1,  "", zcmop_no_zicfiss},
   {"c.mop.3",  MATCH_C_MOP_3,  MASK_C_MOP_3,  "", zcmop},
@@ -2115,85 +2354,6 @@ static const disasm_opcode_t all_insns[] = {
 #undef EXT1_XVS
 #undef EXT2
 #undef EXT2_XV
-
-// -- Helper: ZIMOP (loops over register numbers) --
-static void NOINLINE add_zimop_insns(disassembler_t *d, const isa_parser_t *isa, bool strict)
-{
-  #define DECLARE_INSN(code, match, mask) \
-   const uint32_t match_##code = match; \
-   const uint32_t mask_##code = mask;
-  #include "encoding.h"
-  #undef DECLARE_INSN
-
-  const auto add_r1type = [&](const char *name, uint32_t match, uint32_t mask) {
-    d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1}));
-  };
-  const auto add_rtype = [&](const char *name, uint32_t match, uint32_t mask) {
-    d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1, &xrs2}));
-  };
-
-
-  if (ext_enabled(EXT_ZIMOP)) {
-    add_r1type("mop_r_0", match_mop_r_0, mask_mop_r_0);
-    add_r1type("mop_r_1", match_mop_r_1, mask_mop_r_1);
-    add_r1type("mop_r_2", match_mop_r_2, mask_mop_r_2);
-    add_r1type("mop_r_3", match_mop_r_3, mask_mop_r_3);
-    add_r1type("mop_r_4", match_mop_r_4, mask_mop_r_4);
-    add_r1type("mop_r_5", match_mop_r_5, mask_mop_r_5);
-    add_r1type("mop_r_6", match_mop_r_6, mask_mop_r_6);
-    add_r1type("mop_r_7", match_mop_r_7, mask_mop_r_7);
-    add_r1type("mop_r_8", match_mop_r_8, mask_mop_r_8);
-    add_r1type("mop_r_9", match_mop_r_9, mask_mop_r_9);
-    add_r1type("mop_r_10", match_mop_r_10, mask_mop_r_10);
-    add_r1type("mop_r_11", match_mop_r_11, mask_mop_r_11);
-    add_r1type("mop_r_12", match_mop_r_12, mask_mop_r_12);
-    add_r1type("mop_r_13", match_mop_r_13, mask_mop_r_13);
-    add_r1type("mop_r_14", match_mop_r_14, mask_mop_r_14);
-    add_r1type("mop_r_15", match_mop_r_15, mask_mop_r_15);
-    add_r1type("mop_r_16", match_mop_r_16, mask_mop_r_16);
-    add_r1type("mop_r_17", match_mop_r_17, mask_mop_r_17);
-    add_r1type("mop_r_18", match_mop_r_18, mask_mop_r_18);
-    add_r1type("mop_r_19", match_mop_r_19, mask_mop_r_19);
-    add_r1type("mop_r_20", match_mop_r_20, mask_mop_r_20);
-    add_r1type("mop_r_21", match_mop_r_21, mask_mop_r_21);
-    add_r1type("mop_r_22", match_mop_r_22, mask_mop_r_22);
-    add_r1type("mop_r_23", match_mop_r_23, mask_mop_r_23);
-    add_r1type("mop_r_24", match_mop_r_24, mask_mop_r_24);
-    add_r1type("mop_r_25", match_mop_r_25, mask_mop_r_25);
-    add_r1type("mop_r_26", match_mop_r_26, mask_mop_r_26);
-    add_r1type("mop_r_27", match_mop_r_27, mask_mop_r_27);
-    if (!ext_enabled_strict(EXT_ZICFISS)) {
-      add_r1type("mop_r_28", match_mop_r_28, mask_mop_r_28);
-    } else {
-      // Add code points of mop_r_28 not used by Zicfiss
-      for (unsigned rd_val = 0; rd_val <= 31; ++rd_val)
-        for (unsigned rs1_val = 0; rs1_val <= 31; ++rs1_val)
-          if ((rd_val != 0 && rs1_val !=0) || (rd_val == 0 && !(rs1_val == 1 || rs1_val == 5)))
-            d->add_insn(new disasm_insn_t("mop_r_28", match_mop_r_28 | (rs1_val << 15) | (rd_val << 7), 0xFFFFFFFF, {&xrd, &xrs1}));
-    }
-    add_r1type("mop_r_29", match_mop_r_29, mask_mop_r_29);
-    add_r1type("mop_r_30", match_mop_r_30, mask_mop_r_30);
-    add_r1type("mop_r_31", match_mop_r_31, mask_mop_r_31);
-    add_rtype("mop_rr_0", match_mop_rr_0, mask_mop_rr_0);
-    add_rtype("mop_rr_1", match_mop_rr_1, mask_mop_rr_1);
-    add_rtype("mop_rr_2", match_mop_rr_2, mask_mop_rr_2);
-    add_rtype("mop_rr_3", match_mop_rr_3, mask_mop_rr_3);
-    add_rtype("mop_rr_4", match_mop_rr_4, mask_mop_rr_4);
-    add_rtype("mop_rr_5", match_mop_rr_5, mask_mop_rr_5);
-    add_rtype("mop_rr_6", match_mop_rr_6, mask_mop_rr_6);
-    if (!ext_enabled_strict(EXT_ZICFISS)) {
-      add_rtype("mop_rr_7", match_mop_rr_7, mask_mop_rr_7);
-    } else {
-      // Add code points of mop_rr_7 not used by Zicfiss
-      for (unsigned rd_val = 0; rd_val <= 31; ++rd_val)
-        for (unsigned rs1_val = 0; rs1_val <= 31; ++rs1_val)
-          for (unsigned rs2_val = 0; rs2_val <= 31; ++rs2_val)
-            if ((rs2_val != 1 && rs2_val != 5) || rd_val != 0 || rs1_val != 0)
-              d->add_insn(new disasm_insn_t("mop_rr_7", match_mop_rr_7 | (rs1_val << 15) | (rd_val << 7) | (rs2_val << 20), 0xFFFFFFFF, {&xrd, &xrs1, &xrs2}));
-    }
-  }
-
-}
 
 // -- Helper: vector extensions (complex loop-based generation) --
 static void NOINLINE add_vector_insns(disassembler_t *d, const isa_parser_t *isa, bool strict)
@@ -2793,76 +2953,13 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
     if (insn_class_enabled(op.cls, isa, strict))
       add_insn(new disasm_insn_t(op.name, op.match, op.mask, parse_fmt(op.fmt)));
 
-  // AMO instructions: generate .rl/.aq/.aqrl suffix variants
-  if (ext_enabled(EXT_ZAAMO)) {
-    add_xamo_insn(this, "amoadd.w",  MATCH_AMOADD_W,  MASK_AMOADD_W);
-    add_xamo_insn(this, "amoswap.w", MATCH_AMOSWAP_W, MASK_AMOSWAP_W);
-    add_xamo_insn(this, "amoand.w",  MATCH_AMOAND_W,  MASK_AMOAND_W);
-    add_xamo_insn(this, "amoor.w",   MATCH_AMOOR_W,   MASK_AMOOR_W);
-    add_xamo_insn(this, "amoxor.w",  MATCH_AMOXOR_W,  MASK_AMOXOR_W);
-    add_xamo_insn(this, "amomin.w",  MATCH_AMOMIN_W,  MASK_AMOMIN_W);
-    add_xamo_insn(this, "amomax.w",  MATCH_AMOMAX_W,  MASK_AMOMAX_W);
-    add_xamo_insn(this, "amominu.w", MATCH_AMOMINU_W, MASK_AMOMINU_W);
-    add_xamo_insn(this, "amomaxu.w", MATCH_AMOMAXU_W, MASK_AMOMAXU_W);
-    if (xlen_eq(64)) {
-      add_xamo_insn(this, "amoadd.d",  MATCH_AMOADD_D,  MASK_AMOADD_D);
-      add_xamo_insn(this, "amoswap.d", MATCH_AMOSWAP_D, MASK_AMOSWAP_D);
-      add_xamo_insn(this, "amoand.d",  MATCH_AMOAND_D,  MASK_AMOAND_D);
-      add_xamo_insn(this, "amoor.d",   MATCH_AMOOR_D,   MASK_AMOOR_D);
-      add_xamo_insn(this, "amoxor.d",  MATCH_AMOXOR_D,  MASK_AMOXOR_D);
-      add_xamo_insn(this, "amomin.d",  MATCH_AMOMIN_D,  MASK_AMOMIN_D);
-      add_xamo_insn(this, "amomax.d",  MATCH_AMOMAX_D,  MASK_AMOMAX_D);
-      add_xamo_insn(this, "amominu.d", MATCH_AMOMINU_D, MASK_AMOMINU_D);
-      add_xamo_insn(this, "amomaxu.d", MATCH_AMOMAXU_D, MASK_AMOMAXU_D);
-    }
-  }
-  if (ext_enabled(EXT_ZALRSC)) {
-    add_xamo_insn(this, "sc.w", MATCH_SC_W, MASK_SC_W);
-    if (xlen_eq(64)) add_xamo_insn(this, "sc.d", MATCH_SC_D, MASK_SC_D);
-  }
-  if (ext_enabled(EXT_ZACAS)) {
-    add_xamo_insn(this, "amocas.w", MATCH_AMOCAS_W, MASK_AMOCAS_W);
-    add_xamo_insn(this, "amocas.d", MATCH_AMOCAS_D, MASK_AMOCAS_D);
-    if (xlen_eq(64)) add_xamo_insn(this, "amocas.q", MATCH_AMOCAS_Q, MASK_AMOCAS_Q);
-  }
-  if (ext_enabled(EXT_ZABHA)) {
-    add_xamo_insn(this, "amoadd.b",  MATCH_AMOADD_B,  MASK_AMOADD_B);
-    add_xamo_insn(this, "amoswap.b", MATCH_AMOSWAP_B, MASK_AMOSWAP_B);
-    add_xamo_insn(this, "amoand.b",  MATCH_AMOAND_B,  MASK_AMOAND_B);
-    add_xamo_insn(this, "amoor.b",   MATCH_AMOOR_B,   MASK_AMOOR_B);
-    add_xamo_insn(this, "amoxor.b",  MATCH_AMOXOR_B,  MASK_AMOXOR_B);
-    add_xamo_insn(this, "amomin.b",  MATCH_AMOMIN_B,  MASK_AMOMIN_B);
-    add_xamo_insn(this, "amomax.b",  MATCH_AMOMAX_B,  MASK_AMOMAX_B);
-    add_xamo_insn(this, "amominu.b", MATCH_AMOMINU_B, MASK_AMOMINU_B);
-    add_xamo_insn(this, "amomaxu.b", MATCH_AMOMAXU_B, MASK_AMOMAXU_B);
-    add_xamo_insn(this, "amocas.b",  MATCH_AMOCAS_B,  MASK_AMOCAS_B);
-    add_xamo_insn(this, "amoadd.h",  MATCH_AMOADD_H,  MASK_AMOADD_H);
-    add_xamo_insn(this, "amoswap.h", MATCH_AMOSWAP_H, MASK_AMOSWAP_H);
-    add_xamo_insn(this, "amoand.h",  MATCH_AMOAND_H,  MASK_AMOAND_H);
-    add_xamo_insn(this, "amoor.h",   MATCH_AMOOR_H,   MASK_AMOOR_H);
-    add_xamo_insn(this, "amoxor.h",  MATCH_AMOXOR_H,  MASK_AMOXOR_H);
-    add_xamo_insn(this, "amomin.h",  MATCH_AMOMIN_H,  MASK_AMOMIN_H);
-    add_xamo_insn(this, "amomax.h",  MATCH_AMOMAX_H,  MASK_AMOMAX_H);
-    add_xamo_insn(this, "amominu.h", MATCH_AMOMINU_H, MASK_AMOMINU_H);
-    add_xamo_insn(this, "amomaxu.h", MATCH_AMOMAXU_H, MASK_AMOMAXU_H);
-    add_xamo_insn(this, "amocas.h",  MATCH_AMOCAS_H,  MASK_AMOCAS_H);
-  }
-
   // zext.h: xlen-dependent match, cannot be in static table
   if (ext_enabled(EXT_ZBB))
     add_insn(new disasm_insn_t("zext.h",
       (isa->get_max_xlen() == 32 ? MATCH_PACK : MATCH_PACKW),
       MASK_PACK | (0x1fUL << 20), {&xrd, &xrs1}));
 
-  // Zicfiss AMO variants
-  if (ext_enabled(EXT_ZICFISS)) {
-    add_xamo_insn(this, "ssamoswap.w", MATCH_SSAMOSWAP_W, MASK_SSAMOSWAP_W);
-    if (xlen_eq(64))
-      add_xamo_insn(this, "ssamoswap.d", MATCH_SSAMOSWAP_D, MASK_SSAMOSWAP_D);
-  }
-
   add_vector_insns(this, isa, strict);
-  add_zimop_insns(this, isa, strict);
 }
 
 
