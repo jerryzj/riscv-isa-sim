@@ -630,24 +630,6 @@ std::string disassembler_t::disassemble(insn_t insn) const
 
 
 
-static void NOINLINE add_unknown_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  std::string s = name;
-  s += " (args unknown)";
-
-  d->add_insn(new disasm_insn_t(s.c_str(), match, mask, {}));
-}
-
-
-static void NOINLINE add_unknown_insns(disassembler_t* d)
-{
-  // provide a default disassembly for all instructions as a fallback
-  #define DECLARE_INSN(code, match, mask) \
-   add_unknown_insn(d, #code, match, mask);
-  #include "encoding.h"
-  #undef DECLARE_INSN
-}
-
 // ---------------------------------------------------------------------------
 // insn_class: extension conditions for the flat opcode table.
 // Mirrors binutils' riscv_insn_class — each value names the ISA subset that
@@ -3466,11 +3448,8 @@ disassembler_t::disassembler_t(const isa_parser_t *isa, bool strict)
   add_instructions(isa, true);
 
   if (!strict) {
-    // next-highest priority: other instructions in same base ISA
+    // non-strict: register all instructions regardless of configured ISA
     add_instructions(isa, false);
-
-    // finally: instructions with known opcodes but unknown arguments
-    add_unknown_insns(this);
   }
 
   // Now, reverse the lists, because we search them back-to-front (so that
