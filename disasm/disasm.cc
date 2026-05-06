@@ -720,10 +720,14 @@ enum class insn_class : uint8_t {
   zcmp_rv32,        // EXT_ZCMP + xlen_strict==32
   zcmp_not_rv32,    // EXT_ZCMP + xlen != 32
   zcmp,             zcmt,
+  zcmop,              // EXT_ZCMOP
+  zcmop_no_zicfiss,   // EXT_ZCMOP + !EXT_ZICFISS_strict (those encodings reused by Zicfiss)
   zmmul,            zmmul_rv64,
   zicbom,           zicboz,   zicond,
-  zknd_or_zkne,     // EXT_ZKND || EXT_ZKNE
+  zknd_or_zkne,     // EXT_ZKND || EXT_ZKNE (for aes64ks1i/aes64ks2)
   zknd_rv64,        zkne_rv64,
+  zknd_rv32,        // EXT_ZKND + xlen==32 (for aes32dsi/dsmi)
+  zkne_rv32,        // EXT_ZKNE + xlen==32 (for aes32esi/esmi)
   zknh,             zknh_rv64,   zknh_rv32,
   zksed,            zksh,
   zalasr,
@@ -798,9 +802,11 @@ static bool insn_class_enabled(insn_class cls, const isa_parser_t *isa, bool s)
     case ic::zcb_rv64:        return ext(EXT_ZCB)     && xv(64);
     case ic::zcmp_rv32:       return (ext(EXT_ZCMP) || !s) && xvs(32);
     case ic::zcmp_not_rv32:   return (ext(EXT_ZCMP) || !s) && !xvs(32);
-    case ic::zcmp:            return ext(EXT_ZCMP);
-    case ic::zcmt:            return ext(EXT_ZCMT);
-    case ic::zmmul:           return ext(EXT_ZMMUL);
+    case ic::zcmp:              return ext(EXT_ZCMP);
+    case ic::zcmt:              return ext(EXT_ZCMT);
+    case ic::zcmop:             return ext(EXT_ZCMOP);
+    case ic::zcmop_no_zicfiss:  return ext(EXT_ZCMOP) && !isa->extension_enabled(EXT_ZICFISS);
+    case ic::zmmul:             return ext(EXT_ZMMUL);
     case ic::zmmul_rv64:      return ext(EXT_ZMMUL)   && xv(64);
     case ic::zicbom:          return ext(EXT_ZICBOM);
     case ic::zicboz:          return ext(EXT_ZICBOZ);
@@ -808,6 +814,8 @@ static bool insn_class_enabled(insn_class cls, const isa_parser_t *isa, bool s)
     case ic::zknd_or_zkne:    return isa->extension_enabled(EXT_ZKND) || isa->extension_enabled(EXT_ZKNE) || !s;
     case ic::zknd_rv64:       return ext(EXT_ZKND)    && xv(64);
     case ic::zkne_rv64:       return ext(EXT_ZKNE)    && xv(64);
+    case ic::zknd_rv32:       return ext(EXT_ZKND)    && xv(32);
+    case ic::zkne_rv32:       return ext(EXT_ZKNE)    && xv(32);
     case ic::zknh:            return ext(EXT_ZKNH);
     case ic::zknh_rv64:       return ext(EXT_ZKNH)    && xv(64);
     case ic::zknh_rv32:       return ext(EXT_ZKNH)    && xv(32);
@@ -895,6 +903,9 @@ using enum insn_class;
 // Single flat opcode table (like binutils riscv_opcodes[]).
 // Entry order determines disassembly priority (first = highest after reversal).
 static const disasm_opcode_t all_insns[] = {
+  // highest-priority exact matches
+  {"unimp",   uint32_t(MATCH_CSRRW|(CSR_CYCLE<<20)), 0xffffffff,  "", always},
+  {"c.unimp", 0,                           0xffff,                "", always},
   // prefetch_insns
   {"prefetch_r", MATCH_PREFETCH_R, MASK_PREFETCH_R, "q", always},
   {"prefetch_w", MATCH_PREFETCH_W, MASK_PREFETCH_W, "q", always},
@@ -2080,6 +2091,21 @@ static const disasm_opcode_t all_insns[] = {
   {"psslai.w", MATCH_PSSLAI_W, MASK_PSSLAI_W, "ds<", ext_p_rv64},
   {"pli.w", MATCH_PLI_W, MASK_PLI_W, "d$", ext_p_rv64},
   {"plui.w", MATCH_PLUI_W, MASK_PLUI_W, "d%", ext_p_rv64},
+  // zcmop_insns
+  {"c.mop.1",  MATCH_C_MOP_1,  MASK_C_MOP_1,  "", zcmop_no_zicfiss},
+  {"c.mop.3",  MATCH_C_MOP_3,  MASK_C_MOP_3,  "", zcmop},
+  {"c.mop.5",  MATCH_C_MOP_5,  MASK_C_MOP_5,  "", zcmop_no_zicfiss},
+  {"c.mop.7",  MATCH_C_MOP_7,  MASK_C_MOP_7,  "", zcmop},
+  {"c.mop.9",  MATCH_C_MOP_9,  MASK_C_MOP_9,  "", zcmop},
+  {"c.mop.11", MATCH_C_MOP_11, MASK_C_MOP_11, "", zcmop},
+  {"c.mop.13", MATCH_C_MOP_13, MASK_C_MOP_13, "", zcmop},
+  {"c.mop.15", MATCH_C_MOP_15, MASK_C_MOP_15, "", zcmop},
+  // scalar crypto: aes64ks1i, aes32 variants
+  {"aes64ks1i", MATCH_AES64KS1I, MASK_AES64KS1I, "ds+", zknd_or_zkne},
+  {"aes32dsi",  MATCH_AES32DSI,  MASK_AES32DSI,  "dst-", zknd_rv32},
+  {"aes32dsmi", MATCH_AES32DSMI, MASK_AES32DSMI, "dst-", zknd_rv32},
+  {"aes32esi",  MATCH_AES32ESI,  MASK_AES32ESI,  "dst-", zkne_rv32},
+  {"aes32esmi", MATCH_AES32ESMI, MASK_AES32ESMI, "dst-", zkne_rv32},
 };
 
 #undef EXT1
@@ -2762,9 +2788,6 @@ static void NOINLINE add_vector_insns(disassembler_t *d, const isa_parser_t *isa
 
 void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
 {
-  add_insn(new disasm_insn_t("unimp", MATCH_CSRRW|(CSR_CYCLE<<20), 0xffffffff, {}));
-  add_insn(new disasm_insn_t("c.unimp", 0, 0xffff, {}));
-
   // Flat table iteration (like binutils riscv_opcodes[])
   for (const auto& op : all_insns)
     if (insn_class_enabled(op.cls, isa, strict))
@@ -2830,32 +2853,6 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
     add_insn(new disasm_insn_t("zext.h",
       (isa->get_max_xlen() == 32 ? MATCH_PACK : MATCH_PACKW),
       MASK_PACK | (0x1fUL << 20), {&xrd, &xrs1}));
-
-  // ZCMOP: some entries conditional on !Zicfiss
-  if (ext_enabled(EXT_ZCMOP)) {
-    if (!ext_enabled_strict(EXT_ZICFISS))
-      add_insn(new disasm_insn_t("c.mop.1", MATCH_C_MOP_1, MASK_C_MOP_1, {}));
-    add_insn(new disasm_insn_t("c.mop.3",  MATCH_C_MOP_3,  MASK_C_MOP_3,  {}));
-    if (!ext_enabled_strict(EXT_ZICFISS))
-      add_insn(new disasm_insn_t("c.mop.5", MATCH_C_MOP_5, MASK_C_MOP_5, {}));
-    add_insn(new disasm_insn_t("c.mop.7",  MATCH_C_MOP_7,  MASK_C_MOP_7,  {}));
-    add_insn(new disasm_insn_t("c.mop.9",  MATCH_C_MOP_9,  MASK_C_MOP_9,  {}));
-    add_insn(new disasm_insn_t("c.mop.11", MATCH_C_MOP_11, MASK_C_MOP_11, {}));
-    add_insn(new disasm_insn_t("c.mop.13", MATCH_C_MOP_13, MASK_C_MOP_13, {}));
-    add_insn(new disasm_insn_t("c.mop.15", MATCH_C_MOP_15, MASK_C_MOP_15, {}));
-  }
-
-  // aes64ks1i and aes32 variants carry explicit args not expressible in fmt strings
-  if (ext_enabled(EXT_ZKND) || ext_enabled(EXT_ZKNE))
-    add_insn(new disasm_insn_t("aes64ks1i", MATCH_AES64KS1I, MASK_AES64KS1I, {&xrd, &xrs1, &rcon}));
-  if (ext_enabled(EXT_ZKND) && xlen_eq(32)) {
-    add_insn(new disasm_insn_t("aes32dsi",  MATCH_AES32DSI,  MASK_AES32DSI,  {&xrd, &xrs1, &xrs2, &bs}));
-    add_insn(new disasm_insn_t("aes32dsmi", MATCH_AES32DSMI, MASK_AES32DSMI, {&xrd, &xrs1, &xrs2, &bs}));
-  }
-  if (ext_enabled(EXT_ZKNE) && xlen_eq(32)) {
-    add_insn(new disasm_insn_t("aes32esi",  MATCH_AES32ESI,  MASK_AES32ESI,  {&xrd, &xrs1, &xrs2, &bs}));
-    add_insn(new disasm_insn_t("aes32esmi", MATCH_AES32ESMI, MASK_AES32ESMI, {&xrd, &xrs1, &xrs2, &bs}));
-  }
 
   // Zicfiss AMO variants
   if (ext_enabled(EXT_ZICFISS)) {
