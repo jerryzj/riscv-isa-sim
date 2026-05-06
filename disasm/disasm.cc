@@ -722,6 +722,15 @@ enum class insn_class : uint8_t {
   zacas,            // EXT_ZACAS (amocas.w/d, any xlen)
   zabha,            // EXT_ZABHA
   zimop,            // EXT_ZIMOP
+  vector,            // isa->has_any_vector() || !strict
+  zvqdotq,
+  zvfofp4min,  zvfofp8min,
+  zvfbfmin,    zvfbfwma,
+  zvabd,       zvzip,
+  zvbb,        zvbc,
+  zvkg,        zvkned,
+  zvknh,       // EXT_ZVKNHA || EXT_ZVKNHB
+  zvksed,      zvksh,
   zicfiss,
   zicfiss_rv64,     // EXT_ZICFISS + rv64 (for ssamoswap.d)
   zicfiss_zca,      // EXT_ZICFISS + EXT_ZCA
@@ -820,6 +829,21 @@ static bool insn_class_enabled(insn_class cls, const isa_parser_t *isa, bool s)
     case ic::zksed:           return ext(EXT_ZKSED);
     case ic::zksh:            return ext(EXT_ZKSH);
     case ic::zalasr:          return ext(EXT_ZALASR);
+    case ic::vector:          return isa->has_any_vector() || !s;
+    case ic::zvqdotq:         return ext(EXT_ZVQDOTQ);
+    case ic::zvfofp4min:      return ext(EXT_ZVFOFP4MIN);
+    case ic::zvfofp8min:      return ext(EXT_ZVFOFP8MIN);
+    case ic::zvfbfmin:        return ext(EXT_ZVFBFMIN);
+    case ic::zvfbfwma:        return ext(EXT_ZVFBFWMA);
+    case ic::zvabd:           return ext(EXT_ZVABD);
+    case ic::zvzip:           return ext(EXT_ZVZIP);
+    case ic::zvbb:            return ext(EXT_ZVBB);
+    case ic::zvbc:            return ext(EXT_ZVBC);
+    case ic::zvkg:            return ext(EXT_ZVKG);
+    case ic::zvkned:          return ext(EXT_ZVKNED);
+    case ic::zvknh:           return isa->extension_enabled(EXT_ZVKNHA) || isa->extension_enabled(EXT_ZVKNHB) || !s;
+    case ic::zvksed:          return ext(EXT_ZVKSED);
+    case ic::zvksh:           return ext(EXT_ZVKSH);
     case ic::zicfiss:         return ext(EXT_ZICFISS);
     case ic::zicfiss_zca:     return ext(EXT_ZICFISS) && ext(EXT_ZCA);
     case ic::ext_p:           return ext('P');
@@ -2330,6 +2354,407 @@ static const disasm_opcode_t all_insns[] = {
   {"mop_rr_6", MATCH_MOP_RR_6, MASK_MOP_RR_6, "dst", zimop},
   {"mop_rr_7", MATCH_MOP_RR_7, MASK_MOP_RR_7, "dst", zimop},
 
+  // vector instructions (has_any_vector)
+{"vsetivli", MATCH_VSETIVLI, MASK_VSETIVLI, "dzW", vector},
+  {"vsetvli", MATCH_VSETVLI, MASK_VSETVLI, "dsW", vector},
+  {"vsetvl", MATCH_VSETVL, MASK_VSETVL, "dst", vector},
+  {"vlm.v", MATCH_VLM_V, MASK_VLM_V, "A(?k", vector},
+  {"vsm.v", MATCH_VSM_V, MASK_VSM_V, "G(?k", vector},
+  {"vs1r.v", MATCH_VS1R_V, MASK_VS1R_V | (0x7ul<<29), "G(", vector},
+  {"vs2r.v", MATCH_VS2R_V, MASK_VS2R_V | (0x7ul<<29), "G(", vector},
+  {"vs4r.v", MATCH_VS4R_V, MASK_VS4R_V | (0x7ul<<29), "G(", vector},
+  {"vs8r.v", MATCH_VS8R_V, MASK_VS8R_V | (0x7ul<<29), "G(", vector},
+  {"vadd_vv", MATCH_VADD_VV, MASK_VADD_VV, "ACB?k", vector},
+  {"vadd_vx", MATCH_VADD_VX, MASK_VADD_VX, "ACs?k", vector},
+  {"vadd_vi", MATCH_VADD_VI, MASK_VADD_VI, "AC5?k", vector},
+  {"vsub_vv", MATCH_VSUB_VV, MASK_VSUB_VV, "ACB?k", vector},
+  {"vsub_vx", MATCH_VSUB_VX, MASK_VSUB_VX, "ACs?k", vector},
+  {"vrsub_vx", MATCH_VRSUB_VX, MASK_VRSUB_VX, "ACs?k", vector},
+  {"vrsub_vi", MATCH_VRSUB_VI, MASK_VRSUB_VI, "AC5?k", vector},
+  {"vminu_vv", MATCH_VMINU_VV, MASK_VMINU_VV, "ACB?k", vector},
+  {"vminu_vx", MATCH_VMINU_VX, MASK_VMINU_VX, "ACs?k", vector},
+  {"vmin_vv", MATCH_VMIN_VV, MASK_VMIN_VV, "ACB?k", vector},
+  {"vmin_vx", MATCH_VMIN_VX, MASK_VMIN_VX, "ACs?k", vector},
+  {"vmaxu_vv", MATCH_VMAXU_VV, MASK_VMAXU_VV, "ACB?k", vector},
+  {"vmaxu_vx", MATCH_VMAXU_VX, MASK_VMAXU_VX, "ACs?k", vector},
+  {"vmax_vv", MATCH_VMAX_VV, MASK_VMAX_VV, "ACB?k", vector},
+  {"vmax_vx", MATCH_VMAX_VX, MASK_VMAX_VX, "ACs?k", vector},
+  {"vand_vv", MATCH_VAND_VV, MASK_VAND_VV, "ACB?k", vector},
+  {"vand_vx", MATCH_VAND_VX, MASK_VAND_VX, "ACs?k", vector},
+  {"vand_vi", MATCH_VAND_VI, MASK_VAND_VI, "AC5?k", vector},
+  {"vor_vv", MATCH_VOR_VV, MASK_VOR_VV, "ACB?k", vector},
+  {"vor_vx", MATCH_VOR_VX, MASK_VOR_VX, "ACs?k", vector},
+  {"vor_vi", MATCH_VOR_VI, MASK_VOR_VI, "AC5?k", vector},
+  {"vxor_vv", MATCH_VXOR_VV, MASK_VXOR_VV, "ACB?k", vector},
+  {"vxor_vx", MATCH_VXOR_VX, MASK_VXOR_VX, "ACs?k", vector},
+  {"vxor_vi", MATCH_VXOR_VI, MASK_VXOR_VI, "AC5?k", vector},
+  {"vrgather_vv", MATCH_VRGATHER_VV, MASK_VRGATHER_VV, "ACB?k", vector},
+  {"vrgather_vx", MATCH_VRGATHER_VX, MASK_VRGATHER_VX, "ACs?k", vector},
+  {"vrgather_vi", MATCH_VRGATHER_VI, MASK_VRGATHER_VI, "ACz?k", vector},
+  {"vrgatherei16_vv", MATCH_VRGATHEREI16_VV, MASK_VRGATHEREI16_VV, "ACB?k", vector},
+  {"vslideup_vx", MATCH_VSLIDEUP_VX, MASK_VSLIDEUP_VX, "ACs?k", vector},
+  {"vslideup_vi", MATCH_VSLIDEUP_VI, MASK_VSLIDEUP_VI, "ACz?k", vector},
+  {"vslidedown_vx", MATCH_VSLIDEDOWN_VX, MASK_VSLIDEDOWN_VX, "ACs?k", vector},
+  {"vslidedown_vi", MATCH_VSLIDEDOWN_VI, MASK_VSLIDEDOWN_VI, "ACz?k", vector},
+  {"vadc_vvm", MATCH_VADC_VVM, MASK_VADC_VVM|(1<<25), "ACBK", vector},
+  {"vadc_vxm", MATCH_VADC_VXM, MASK_VADC_VXM|(1<<25), "ACsK", vector},
+  {"vadc_vim", MATCH_VADC_VIM, MASK_VADC_VIM|(1<<25), "AC5K", vector},
+  {"vsbc_vvm", MATCH_VSBC_VVM, MASK_VSBC_VVM|(1<<25), "ACBK", vector},
+  {"vsbc_vxm", MATCH_VSBC_VXM, MASK_VSBC_VXM|(1<<25), "ACsK", vector},
+  {"vmadc_vvm", MATCH_VMADC_VVM, MASK_VMADC_VVM|(1<<25), "ACBK", vector},
+  {"vmadc_vxm", MATCH_VMADC_VXM, MASK_VMADC_VXM|(1<<25), "ACsK", vector},
+  {"vmadc_vim", MATCH_VMADC_VIM, MASK_VMADC_VIM|(1<<25), "AC5K", vector},
+  {"vmadc_vv", MATCH_VMADC_VV, MASK_VMADC_VV, "ACB?k", vector},
+  {"vmadc_vx", MATCH_VMADC_VX, MASK_VMADC_VX, "ACs?k", vector},
+  {"vmadc_vi", MATCH_VMADC_VI, MASK_VMADC_VI, "AC5?k", vector},
+  {"vmsbc_vvm", MATCH_VMSBC_VVM, MASK_VMSBC_VVM|(1<<25), "ACBK", vector},
+  {"vmsbc_vxm", MATCH_VMSBC_VXM, MASK_VMSBC_VXM|(1<<25), "ACsK", vector},
+  {"vmsbc_vv", MATCH_VMSBC_VV, MASK_VMSBC_VV, "ACB?k", vector},
+  {"vmsbc_vx", MATCH_VMSBC_VX, MASK_VMSBC_VX, "ACs?k", vector},
+  {"vmerge_vvm", MATCH_VMERGE_VVM, MASK_VMERGE_VVM|(1<<25), "ACBK", vector},
+  {"vmerge_vxm", MATCH_VMERGE_VXM, MASK_VMERGE_VXM|(1<<25), "ACsK", vector},
+  {"vmerge_vim", MATCH_VMERGE_VIM, MASK_VMERGE_VIM|(1<<25), "AC5K", vector},
+  {"vmv.v.i", MATCH_VMV_V_I, MASK_VMV_V_I, "A5", vector},
+  {"vmv.v.v", MATCH_VMV_V_V, MASK_VMV_V_V, "AB", vector},
+  {"vmv.v.x", MATCH_VMV_V_X, MASK_VMV_V_X, "As", vector},
+  {"vmseq_vv", MATCH_VMSEQ_VV, MASK_VMSEQ_VV, "ACB?k", vector},
+  {"vmseq_vx", MATCH_VMSEQ_VX, MASK_VMSEQ_VX, "ACs?k", vector},
+  {"vmseq_vi", MATCH_VMSEQ_VI, MASK_VMSEQ_VI, "AC5?k", vector},
+  {"vmsne_vv", MATCH_VMSNE_VV, MASK_VMSNE_VV, "ACB?k", vector},
+  {"vmsne_vx", MATCH_VMSNE_VX, MASK_VMSNE_VX, "ACs?k", vector},
+  {"vmsne_vi", MATCH_VMSNE_VI, MASK_VMSNE_VI, "AC5?k", vector},
+  {"vmsltu_vv", MATCH_VMSLTU_VV, MASK_VMSLTU_VV, "ACB?k", vector},
+  {"vmsltu_vx", MATCH_VMSLTU_VX, MASK_VMSLTU_VX, "ACs?k", vector},
+  {"vmslt_vv", MATCH_VMSLT_VV, MASK_VMSLT_VV, "ACB?k", vector},
+  {"vmslt_vx", MATCH_VMSLT_VX, MASK_VMSLT_VX, "ACs?k", vector},
+  {"vmsleu_vv", MATCH_VMSLEU_VV, MASK_VMSLEU_VV, "ACB?k", vector},
+  {"vmsleu_vx", MATCH_VMSLEU_VX, MASK_VMSLEU_VX, "ACs?k", vector},
+  {"vmsleu_vi", MATCH_VMSLEU_VI, MASK_VMSLEU_VI, "ACz?k", vector},
+  {"vmsle_vv", MATCH_VMSLE_VV, MASK_VMSLE_VV, "ACB?k", vector},
+  {"vmsle_vx", MATCH_VMSLE_VX, MASK_VMSLE_VX, "ACs?k", vector},
+  {"vmsle_vi", MATCH_VMSLE_VI, MASK_VMSLE_VI, "AC5?k", vector},
+  {"vmsgtu_vx", MATCH_VMSGTU_VX, MASK_VMSGTU_VX, "ACs?k", vector},
+  {"vmsgtu_vi", MATCH_VMSGTU_VI, MASK_VMSGTU_VI, "ACz?k", vector},
+  {"vmsgt_vx", MATCH_VMSGT_VX, MASK_VMSGT_VX, "ACs?k", vector},
+  {"vmsgt_vi", MATCH_VMSGT_VI, MASK_VMSGT_VI, "AC5?k", vector},
+  {"vsaddu_vv", MATCH_VSADDU_VV, MASK_VSADDU_VV, "ACB?k", vector},
+  {"vsaddu_vx", MATCH_VSADDU_VX, MASK_VSADDU_VX, "ACs?k", vector},
+  {"vsaddu_vi", MATCH_VSADDU_VI, MASK_VSADDU_VI, "ACz?k", vector},
+  {"vsadd_vv", MATCH_VSADD_VV, MASK_VSADD_VV, "ACB?k", vector},
+  {"vsadd_vx", MATCH_VSADD_VX, MASK_VSADD_VX, "ACs?k", vector},
+  {"vsadd_vi", MATCH_VSADD_VI, MASK_VSADD_VI, "AC5?k", vector},
+  {"vssubu_vv", MATCH_VSSUBU_VV, MASK_VSSUBU_VV, "ACB?k", vector},
+  {"vssubu_vx", MATCH_VSSUBU_VX, MASK_VSSUBU_VX, "ACs?k", vector},
+  {"vssub_vv", MATCH_VSSUB_VV, MASK_VSSUB_VV, "ACB?k", vector},
+  {"vssub_vx", MATCH_VSSUB_VX, MASK_VSSUB_VX, "ACs?k", vector},
+  {"vsll_vv", MATCH_VSLL_VV, MASK_VSLL_VV, "ACB?k", vector},
+  {"vsll_vx", MATCH_VSLL_VX, MASK_VSLL_VX, "ACs?k", vector},
+  {"vsll_vi", MATCH_VSLL_VI, MASK_VSLL_VI, "AC5?k", vector},
+  {"vmv1r.v", MATCH_VMV1R_V, MASK_VMV1R_V, "AC", vector},
+  {"vmv2r.v", MATCH_VMV2R_V, MASK_VMV2R_V, "AC", vector},
+  {"vmv4r.v", MATCH_VMV4R_V, MASK_VMV4R_V, "AC", vector},
+  {"vmv8r.v", MATCH_VMV8R_V, MASK_VMV8R_V, "AC", vector},
+  {"vsmul_vv", MATCH_VSMUL_VV, MASK_VSMUL_VV, "ACB?k", vector},
+  {"vsmul_vx", MATCH_VSMUL_VX, MASK_VSMUL_VX, "ACs?k", vector},
+  {"vsrl_vv", MATCH_VSRL_VV, MASK_VSRL_VV, "ACB?k", vector},
+  {"vsrl_vx", MATCH_VSRL_VX, MASK_VSRL_VX, "ACs?k", vector},
+  {"vsrl_vi", MATCH_VSRL_VI, MASK_VSRL_VI, "ACz?k", vector},
+  {"vsra_vv", MATCH_VSRA_VV, MASK_VSRA_VV, "ACB?k", vector},
+  {"vsra_vx", MATCH_VSRA_VX, MASK_VSRA_VX, "ACs?k", vector},
+  {"vsra_vi", MATCH_VSRA_VI, MASK_VSRA_VI, "ACz?k", vector},
+  {"vssrl_vv", MATCH_VSSRL_VV, MASK_VSSRL_VV, "ACB?k", vector},
+  {"vssrl_vx", MATCH_VSSRL_VX, MASK_VSSRL_VX, "ACs?k", vector},
+  {"vssrl_vi", MATCH_VSSRL_VI, MASK_VSSRL_VI, "ACz?k", vector},
+  {"vssra_vv", MATCH_VSSRA_VV, MASK_VSSRA_VV, "ACB?k", vector},
+  {"vssra_vx", MATCH_VSSRA_VX, MASK_VSSRA_VX, "ACs?k", vector},
+  {"vssra_vi", MATCH_VSSRA_VI, MASK_VSSRA_VI, "ACz?k", vector},
+  {"vnsrl_wv", MATCH_VNSRL_WV, MASK_VNSRL_WV, "ACB?k", vector},
+  {"vnsrl_wx", MATCH_VNSRL_WX, MASK_VNSRL_WX, "ACs?k", vector},
+  {"vnsrl_wi", MATCH_VNSRL_WI, MASK_VNSRL_WI, "ACz?k", vector},
+  {"vnsra_wv", MATCH_VNSRA_WV, MASK_VNSRA_WV, "ACB?k", vector},
+  {"vnsra_wx", MATCH_VNSRA_WX, MASK_VNSRA_WX, "ACs?k", vector},
+  {"vnsra_wi", MATCH_VNSRA_WI, MASK_VNSRA_WI, "ACz?k", vector},
+  {"vnclipu_wv", MATCH_VNCLIPU_WV, MASK_VNCLIPU_WV, "ACB?k", vector},
+  {"vnclipu_wx", MATCH_VNCLIPU_WX, MASK_VNCLIPU_WX, "ACs?k", vector},
+  {"vnclipu_wi", MATCH_VNCLIPU_WI, MASK_VNCLIPU_WI, "ACz?k", vector},
+  {"vnclip_wv", MATCH_VNCLIP_WV, MASK_VNCLIP_WV, "ACB?k", vector},
+  {"vnclip_wx", MATCH_VNCLIP_WX, MASK_VNCLIP_WX, "ACs?k", vector},
+  {"vnclip_wi", MATCH_VNCLIP_WI, MASK_VNCLIP_WI, "ACz?k", vector},
+  {"vwredsumu_vs", MATCH_VWREDSUMU_VS, MASK_VWREDSUMU_VS, "ACB?k", vector},
+  {"vwredsum_vs", MATCH_VWREDSUM_VS, MASK_VWREDSUM_VS, "ACB?k", vector},
+  {"vaaddu_vv", MATCH_VAADDU_VV, MASK_VAADDU_VV, "ACB?k", vector},
+  {"vaaddu_vx", MATCH_VAADDU_VX, MASK_VAADDU_VX, "ACs?k", vector},
+  {"vaadd_vv", MATCH_VAADD_VV, MASK_VAADD_VV, "ACB?k", vector},
+  {"vaadd_vx", MATCH_VAADD_VX, MASK_VAADD_VX, "ACs?k", vector},
+  {"vasubu_vv", MATCH_VASUBU_VV, MASK_VASUBU_VV, "ACB?k", vector},
+  {"vasubu_vx", MATCH_VASUBU_VX, MASK_VASUBU_VX, "ACs?k", vector},
+  {"vasub_vv", MATCH_VASUB_VV, MASK_VASUB_VV, "ACB?k", vector},
+  {"vasub_vx", MATCH_VASUB_VX, MASK_VASUB_VX, "ACs?k", vector},
+  {"vredsum_vs", MATCH_VREDSUM_VS, MASK_VREDSUM_VS, "ACB?k", vector},
+  {"vredand_vs", MATCH_VREDAND_VS, MASK_VREDAND_VS, "ACB?k", vector},
+  {"vredor_vs", MATCH_VREDOR_VS, MASK_VREDOR_VS, "ACB?k", vector},
+  {"vredxor_vs", MATCH_VREDXOR_VS, MASK_VREDXOR_VS, "ACB?k", vector},
+  {"vredminu_vs", MATCH_VREDMINU_VS, MASK_VREDMINU_VS, "ACB?k", vector},
+  {"vredmin_vs", MATCH_VREDMIN_VS, MASK_VREDMIN_VS, "ACB?k", vector},
+  {"vredmaxu_vs", MATCH_VREDMAXU_VS, MASK_VREDMAXU_VS, "ACB?k", vector},
+  {"vredmax_vs", MATCH_VREDMAX_VS, MASK_VREDMAX_VS, "ACB?k", vector},
+  {"vslide1up_vx", MATCH_VSLIDE1UP_VX, MASK_VSLIDE1UP_VX, "ACs?k", vector},
+  {"vslide1down_vx", MATCH_VSLIDE1DOWN_VX, MASK_VSLIDE1DOWN_VX, "ACs?k", vector},
+  {"vmv.x.s", MATCH_VMV_X_S, MASK_VMV_X_S, "dC", vector},
+  {"vcpop.m", MATCH_VCPOP_M, MASK_VCPOP_M, "dC?k", vector},
+  {"vfirst.m", MATCH_VFIRST_M, MASK_VFIRST_M, "dC?k", vector},
+  {"vmv.s.x", MATCH_VMV_S_X, MASK_VMV_S_X, "As", vector},
+  {"vzext_vf2", MATCH_VZEXT_VF2, MASK_VZEXT_VF2, "AC?k", vector},
+  {"vsext_vf2", MATCH_VSEXT_VF2, MASK_VSEXT_VF2, "AC?k", vector},
+  {"vzext_vf4", MATCH_VZEXT_VF4, MASK_VZEXT_VF4, "AC?k", vector},
+  {"vsext_vf4", MATCH_VSEXT_VF4, MASK_VSEXT_VF4, "AC?k", vector},
+  {"vzext_vf8", MATCH_VZEXT_VF8, MASK_VZEXT_VF8, "AC?k", vector},
+  {"vsext_vf8", MATCH_VSEXT_VF8, MASK_VSEXT_VF8, "AC?k", vector},
+  {"vmsbf_m", MATCH_VMSBF_M, MASK_VMSBF_M, "AC?k", vector},
+  {"vmsof_m", MATCH_VMSOF_M, MASK_VMSOF_M, "AC?k", vector},
+  {"vmsif_m", MATCH_VMSIF_M, MASK_VMSIF_M, "AC?k", vector},
+  {"viota_m", MATCH_VIOTA_M, MASK_VIOTA_M, "AC?k", vector},
+  {"vid.v", MATCH_VID_V, MASK_VID_V, "A?k", vector},
+  {"vid.v", MATCH_VID_V, MASK_VID_V, "A?k", vector},
+  {"vcompress.vm", MATCH_VCOMPRESS_VM, MASK_VCOMPRESS_VM, "ACB", vector},
+  {"vmandn_mm", MATCH_VMANDN_MM, MASK_VMANDN_MM, "ACB?k", vector},
+  {"vmand_mm", MATCH_VMAND_MM, MASK_VMAND_MM, "ACB?k", vector},
+  {"vmor_mm", MATCH_VMOR_MM, MASK_VMOR_MM, "ACB?k", vector},
+  {"vmxor_mm", MATCH_VMXOR_MM, MASK_VMXOR_MM, "ACB?k", vector},
+  {"vmorn_mm", MATCH_VMORN_MM, MASK_VMORN_MM, "ACB?k", vector},
+  {"vmnand_mm", MATCH_VMNAND_MM, MASK_VMNAND_MM, "ACB?k", vector},
+  {"vmnor_mm", MATCH_VMNOR_MM, MASK_VMNOR_MM, "ACB?k", vector},
+  {"vmxnor_mm", MATCH_VMXNOR_MM, MASK_VMXNOR_MM, "ACB?k", vector},
+  {"vdivu_vv", MATCH_VDIVU_VV, MASK_VDIVU_VV, "ACB?k", vector},
+  {"vdivu_vx", MATCH_VDIVU_VX, MASK_VDIVU_VX, "ACs?k", vector},
+  {"vdiv_vv", MATCH_VDIV_VV, MASK_VDIV_VV, "ACB?k", vector},
+  {"vdiv_vx", MATCH_VDIV_VX, MASK_VDIV_VX, "ACs?k", vector},
+  {"vremu_vv", MATCH_VREMU_VV, MASK_VREMU_VV, "ACB?k", vector},
+  {"vremu_vx", MATCH_VREMU_VX, MASK_VREMU_VX, "ACs?k", vector},
+  {"vrem_vv", MATCH_VREM_VV, MASK_VREM_VV, "ACB?k", vector},
+  {"vrem_vx", MATCH_VREM_VX, MASK_VREM_VX, "ACs?k", vector},
+  {"vmulhu_vv", MATCH_VMULHU_VV, MASK_VMULHU_VV, "ACB?k", vector},
+  {"vmulhu_vx", MATCH_VMULHU_VX, MASK_VMULHU_VX, "ACs?k", vector},
+  {"vmul_vv", MATCH_VMUL_VV, MASK_VMUL_VV, "ACB?k", vector},
+  {"vmul_vx", MATCH_VMUL_VX, MASK_VMUL_VX, "ACs?k", vector},
+  {"vmulhsu_vv", MATCH_VMULHSU_VV, MASK_VMULHSU_VV, "ACB?k", vector},
+  {"vmulhsu_vx", MATCH_VMULHSU_VX, MASK_VMULHSU_VX, "ACs?k", vector},
+  {"vmulh_vv", MATCH_VMULH_VV, MASK_VMULH_VV, "ACB?k", vector},
+  {"vmulh_vx", MATCH_VMULH_VX, MASK_VMULH_VX, "ACs?k", vector},
+  {"vmadd_vv", MATCH_VMADD_VV, MASK_VMADD_VV, "ABC?k", vector},
+  {"vmadd_vx", MATCH_VMADD_VX, MASK_VMADD_VX, "AsC?k", vector},
+  {"vnmsub_vv", MATCH_VNMSUB_VV, MASK_VNMSUB_VV, "ABC?k", vector},
+  {"vnmsub_vx", MATCH_VNMSUB_VX, MASK_VNMSUB_VX, "AsC?k", vector},
+  {"vmacc_vv", MATCH_VMACC_VV, MASK_VMACC_VV, "ABC?k", vector},
+  {"vmacc_vx", MATCH_VMACC_VX, MASK_VMACC_VX, "AsC?k", vector},
+  {"vnmsac_vv", MATCH_VNMSAC_VV, MASK_VNMSAC_VV, "ABC?k", vector},
+  {"vnmsac_vx", MATCH_VNMSAC_VX, MASK_VNMSAC_VX, "AsC?k", vector},
+  {"vwaddu_vv", MATCH_VWADDU_VV, MASK_VWADDU_VV, "ACB?k", vector},
+  {"vwaddu_vx", MATCH_VWADDU_VX, MASK_VWADDU_VX, "ACs?k", vector},
+  {"vwadd_vv", MATCH_VWADD_VV, MASK_VWADD_VV, "ACB?k", vector},
+  {"vwadd_vx", MATCH_VWADD_VX, MASK_VWADD_VX, "ACs?k", vector},
+  {"vwsubu_vv", MATCH_VWSUBU_VV, MASK_VWSUBU_VV, "ACB?k", vector},
+  {"vwsubu_vx", MATCH_VWSUBU_VX, MASK_VWSUBU_VX, "ACs?k", vector},
+  {"vwsub_vv", MATCH_VWSUB_VV, MASK_VWSUB_VV, "ACB?k", vector},
+  {"vwsub_vx", MATCH_VWSUB_VX, MASK_VWSUB_VX, "ACs?k", vector},
+  {"vwaddu_wv", MATCH_VWADDU_WV, MASK_VWADDU_WV, "ACB?k", vector},
+  {"vwaddu_wx", MATCH_VWADDU_WX, MASK_VWADDU_WX, "ACs?k", vector},
+  {"vwadd_wv", MATCH_VWADD_WV, MASK_VWADD_WV, "ACB?k", vector},
+  {"vwadd_wx", MATCH_VWADD_WX, MASK_VWADD_WX, "ACs?k", vector},
+  {"vwsubu_wv", MATCH_VWSUBU_WV, MASK_VWSUBU_WV, "ACB?k", vector},
+  {"vwsubu_wx", MATCH_VWSUBU_WX, MASK_VWSUBU_WX, "ACs?k", vector},
+  {"vwsub_wv", MATCH_VWSUB_WV, MASK_VWSUB_WV, "ACB?k", vector},
+  {"vwsub_wx", MATCH_VWSUB_WX, MASK_VWSUB_WX, "ACs?k", vector},
+  {"vwmulu_vv", MATCH_VWMULU_VV, MASK_VWMULU_VV, "ACB?k", vector},
+  {"vwmulu_vx", MATCH_VWMULU_VX, MASK_VWMULU_VX, "ACs?k", vector},
+  {"vwmulsu_vv", MATCH_VWMULSU_VV, MASK_VWMULSU_VV, "ACB?k", vector},
+  {"vwmulsu_vx", MATCH_VWMULSU_VX, MASK_VWMULSU_VX, "ACs?k", vector},
+  {"vwmul_vv", MATCH_VWMUL_VV, MASK_VWMUL_VV, "ACB?k", vector},
+  {"vwmul_vx", MATCH_VWMUL_VX, MASK_VWMUL_VX, "ACs?k", vector},
+  {"vwmaccu_vv", MATCH_VWMACCU_VV, MASK_VWMACCU_VV, "ABC?k", vector},
+  {"vwmaccu_vx", MATCH_VWMACCU_VX, MASK_VWMACCU_VX, "AsC?k", vector},
+  {"vwmacc_vv", MATCH_VWMACC_VV, MASK_VWMACC_VV, "ABC?k", vector},
+  {"vwmacc_vx", MATCH_VWMACC_VX, MASK_VWMACC_VX, "AsC?k", vector},
+  {"vwmaccus_vx", MATCH_VWMACCUS_VX, MASK_VWMACCUS_VX, "AsC?k", vector},
+  {"vwmaccsu_vv", MATCH_VWMACCSU_VV, MASK_VWMACCSU_VV, "ABC?k", vector},
+  {"vwmaccsu_vx", MATCH_VWMACCSU_VX, MASK_VWMACCSU_VX, "AsC?k", vector},
+  {"vqdot_vv", MATCH_VQDOT_VV, MASK_VQDOT_VV, "ACB?k", zvqdotq},
+  {"vqdot_vx", MATCH_VQDOT_VX, MASK_VQDOT_VX, "ACs?k", zvqdotq},
+  {"vqdotu_vv", MATCH_VQDOTU_VV, MASK_VQDOTU_VV, "ACB?k", zvqdotq},
+  {"vqdotu_vx", MATCH_VQDOTU_VX, MASK_VQDOTU_VX, "ACs?k", zvqdotq},
+  {"vqdotsu_vv", MATCH_VQDOTSU_VV, MASK_VQDOTSU_VV, "ACB?k", zvqdotq},
+  {"vqdotsu_vx", MATCH_VQDOTSU_VX, MASK_VQDOTSU_VX, "ACs?k", zvqdotq},
+  {"vqdotus_vx", MATCH_VQDOTUS_VX, MASK_VQDOTUS_VX, "ACs?k", zvqdotq},
+  {"vfadd_vv", MATCH_VFADD_VV, MASK_VFADD_VV, "ACB?k", vector},
+  {"vfadd_vf", MATCH_VFADD_VF, MASK_VFADD_VF, "ACS?k", vector},
+  {"vfredusum_vs", MATCH_VFREDUSUM_VS, MASK_VFREDUSUM_VS, "ACB?k", vector},
+  {"vfsub_vv", MATCH_VFSUB_VV, MASK_VFSUB_VV, "ACB?k", vector},
+  {"vfsub_vf", MATCH_VFSUB_VF, MASK_VFSUB_VF, "ACS?k", vector},
+  {"vfredosum_vs", MATCH_VFREDOSUM_VS, MASK_VFREDOSUM_VS, "ACB?k", vector},
+  {"vfmin_vv", MATCH_VFMIN_VV, MASK_VFMIN_VV, "ACB?k", vector},
+  {"vfmin_vf", MATCH_VFMIN_VF, MASK_VFMIN_VF, "ACS?k", vector},
+  {"vfredmin_vs", MATCH_VFREDMIN_VS, MASK_VFREDMIN_VS, "ACB?k", vector},
+  {"vfmax_vv", MATCH_VFMAX_VV, MASK_VFMAX_VV, "ACB?k", vector},
+  {"vfmax_vf", MATCH_VFMAX_VF, MASK_VFMAX_VF, "ACS?k", vector},
+  {"vfredmax_vs", MATCH_VFREDMAX_VS, MASK_VFREDMAX_VS, "ACB?k", vector},
+  {"vfsgnj_vv", MATCH_VFSGNJ_VV, MASK_VFSGNJ_VV, "ACB?k", vector},
+  {"vfsgnj_vf", MATCH_VFSGNJ_VF, MASK_VFSGNJ_VF, "ACS?k", vector},
+  {"vfsgnjn_vv", MATCH_VFSGNJN_VV, MASK_VFSGNJN_VV, "ACB?k", vector},
+  {"vfsgnjn_vf", MATCH_VFSGNJN_VF, MASK_VFSGNJN_VF, "ACS?k", vector},
+  {"vfsgnjx_vv", MATCH_VFSGNJX_VV, MASK_VFSGNJX_VV, "ACB?k", vector},
+  {"vfsgnjx_vf", MATCH_VFSGNJX_VF, MASK_VFSGNJX_VF, "ACS?k", vector},
+  {"vfmv.f.s", MATCH_VFMV_F_S, MASK_VFMV_F_S, "DC", vector},
+  {"vfmv.s.f", MATCH_VFMV_S_F, MASK_VFMV_S_F | MASK_VFMV_S_F, "AS", vector},
+  {"vfslide1up_vf", MATCH_VFSLIDE1UP_VF, MASK_VFSLIDE1UP_VF, "ACS?k", vector},
+  {"vfslide1down_vf", MATCH_VFSLIDE1DOWN_VF, MASK_VFSLIDE1DOWN_VF, "ACS?k", vector},
+  {"vfmerge.vfm", MATCH_VFMERGE_VFM, MASK_VFMERGE_VFM, "ACSK", vector},
+  {"vfmv.v.f", MATCH_VFMV_V_F, MASK_VFMV_V_F, "AS", vector},
+  {"vmfeq_vv", MATCH_VMFEQ_VV, MASK_VMFEQ_VV, "ACB?k", vector},
+  {"vmfeq_vf", MATCH_VMFEQ_VF, MASK_VMFEQ_VF, "ACS?k", vector},
+  {"vmfle_vv", MATCH_VMFLE_VV, MASK_VMFLE_VV, "ACB?k", vector},
+  {"vmfle_vf", MATCH_VMFLE_VF, MASK_VMFLE_VF, "ACS?k", vector},
+  {"vmflt_vv", MATCH_VMFLT_VV, MASK_VMFLT_VV, "ACB?k", vector},
+  {"vmflt_vf", MATCH_VMFLT_VF, MASK_VMFLT_VF, "ACS?k", vector},
+  {"vmfne_vv", MATCH_VMFNE_VV, MASK_VMFNE_VV, "ACB?k", vector},
+  {"vmfne_vf", MATCH_VMFNE_VF, MASK_VMFNE_VF, "ACS?k", vector},
+  {"vmfgt_vf", MATCH_VMFGT_VF, MASK_VMFGT_VF, "ACS?k", vector},
+  {"vmfge_vf", MATCH_VMFGE_VF, MASK_VMFGE_VF, "ACS?k", vector},
+  {"vfdiv_vv", MATCH_VFDIV_VV, MASK_VFDIV_VV, "ACB?k", vector},
+  {"vfdiv_vf", MATCH_VFDIV_VF, MASK_VFDIV_VF, "ACS?k", vector},
+  {"vfrdiv_vf", MATCH_VFRDIV_VF, MASK_VFRDIV_VF, "ACS?k", vector},
+  {"vfcvt_rtz_xu_f_v", MATCH_VFCVT_RTZ_XU_F_V, MASK_VFCVT_RTZ_XU_F_V, "AC?k", vector},
+  {"vfcvt_rtz_x_f_v", MATCH_VFCVT_RTZ_X_F_V, MASK_VFCVT_RTZ_X_F_V, "AC?k", vector},
+  {"vfcvt_xu_f_v", MATCH_VFCVT_XU_F_V, MASK_VFCVT_XU_F_V, "AC?k", vector},
+  {"vfcvt_x_f_v", MATCH_VFCVT_X_F_V, MASK_VFCVT_X_F_V, "AC?k", vector},
+  {"vfcvt_f_xu_v", MATCH_VFCVT_F_XU_V, MASK_VFCVT_F_XU_V, "AC?k", vector},
+  {"vfcvt_f_x_v", MATCH_VFCVT_F_X_V, MASK_VFCVT_F_X_V, "AC?k", vector},
+  {"vfwcvt_rtz_xu_f_v", MATCH_VFWCVT_RTZ_XU_F_V, MASK_VFWCVT_RTZ_XU_F_V, "AC?k", vector},
+  {"vfwcvt_rtz_x_f_v", MATCH_VFWCVT_RTZ_X_F_V, MASK_VFWCVT_RTZ_X_F_V, "AC?k", vector},
+  {"vfwcvt_xu_f_v", MATCH_VFWCVT_XU_F_V, MASK_VFWCVT_XU_F_V, "AC?k", vector},
+  {"vfwcvt_x_f_v", MATCH_VFWCVT_X_F_V, MASK_VFWCVT_X_F_V, "AC?k", vector},
+  {"vfwcvt_f_xu_v", MATCH_VFWCVT_F_XU_V, MASK_VFWCVT_F_XU_V, "AC?k", vector},
+  {"vfwcvt_f_x_v", MATCH_VFWCVT_F_X_V, MASK_VFWCVT_F_X_V, "AC?k", vector},
+  {"vfwcvt_f_f_v", MATCH_VFWCVT_F_F_V, MASK_VFWCVT_F_F_V, "AC?k", vector},
+  {"vfncvt_rtz_xu_f_w", MATCH_VFNCVT_RTZ_XU_F_W, MASK_VFNCVT_RTZ_XU_F_W, "AC?k", vector},
+  {"vfncvt_rtz_x_f_w", MATCH_VFNCVT_RTZ_X_F_W, MASK_VFNCVT_RTZ_X_F_W, "AC?k", vector},
+  {"vfncvt_xu_f_w", MATCH_VFNCVT_XU_F_W, MASK_VFNCVT_XU_F_W, "AC?k", vector},
+  {"vfncvt_x_f_w", MATCH_VFNCVT_X_F_W, MASK_VFNCVT_X_F_W, "AC?k", vector},
+  {"vfncvt_f_xu_w", MATCH_VFNCVT_F_XU_W, MASK_VFNCVT_F_XU_W, "AC?k", vector},
+  {"vfncvt_f_x_w", MATCH_VFNCVT_F_X_W, MASK_VFNCVT_F_X_W, "AC?k", vector},
+  {"vfncvt_f_f_w", MATCH_VFNCVT_F_F_W, MASK_VFNCVT_F_F_W, "AC?k", vector},
+  {"vfncvt_rod_f_f_w", MATCH_VFNCVT_ROD_F_F_W, MASK_VFNCVT_ROD_F_F_W, "AC?k", vector},
+  {"vfsqrt_v", MATCH_VFSQRT_V, MASK_VFSQRT_V, "AC?k", vector},
+  {"vfrsqrt7_v", MATCH_VFRSQRT7_V, MASK_VFRSQRT7_V, "AC?k", vector},
+  {"vfrec7_v", MATCH_VFREC7_V, MASK_VFREC7_V, "AC?k", vector},
+  {"vfclass_v", MATCH_VFCLASS_V, MASK_VFCLASS_V, "AC?k", vector},
+  {"vfmul_vv", MATCH_VFMUL_VV, MASK_VFMUL_VV, "ACB?k", vector},
+  {"vfmul_vf", MATCH_VFMUL_VF, MASK_VFMUL_VF, "ACS?k", vector},
+  {"vfrsub_vf", MATCH_VFRSUB_VF, MASK_VFRSUB_VF, "ACS?k", vector},
+  {"vfmadd_vv", MATCH_VFMADD_VV, MASK_VFMADD_VV, "ABC?k", vector},
+  {"vfmadd_vf", MATCH_VFMADD_VF, MASK_VFMADD_VF, "ASC?k", vector},
+  {"vfnmadd_vv", MATCH_VFNMADD_VV, MASK_VFNMADD_VV, "ABC?k", vector},
+  {"vfnmadd_vf", MATCH_VFNMADD_VF, MASK_VFNMADD_VF, "ASC?k", vector},
+  {"vfmsub_vv", MATCH_VFMSUB_VV, MASK_VFMSUB_VV, "ABC?k", vector},
+  {"vfmsub_vf", MATCH_VFMSUB_VF, MASK_VFMSUB_VF, "ASC?k", vector},
+  {"vfnmsub_vv", MATCH_VFNMSUB_VV, MASK_VFNMSUB_VV, "ABC?k", vector},
+  {"vfnmsub_vf", MATCH_VFNMSUB_VF, MASK_VFNMSUB_VF, "ASC?k", vector},
+  {"vfmacc_vv", MATCH_VFMACC_VV, MASK_VFMACC_VV, "ABC?k", vector},
+  {"vfmacc_vf", MATCH_VFMACC_VF, MASK_VFMACC_VF, "ASC?k", vector},
+  {"vfnmacc_vv", MATCH_VFNMACC_VV, MASK_VFNMACC_VV, "ABC?k", vector},
+  {"vfnmacc_vf", MATCH_VFNMACC_VF, MASK_VFNMACC_VF, "ASC?k", vector},
+  {"vfmsac_vv", MATCH_VFMSAC_VV, MASK_VFMSAC_VV, "ABC?k", vector},
+  {"vfmsac_vf", MATCH_VFMSAC_VF, MASK_VFMSAC_VF, "ASC?k", vector},
+  {"vfnmsac_vv", MATCH_VFNMSAC_VV, MASK_VFNMSAC_VV, "ABC?k", vector},
+  {"vfnmsac_vf", MATCH_VFNMSAC_VF, MASK_VFNMSAC_VF, "ASC?k", vector},
+  {"vfwadd_vv", MATCH_VFWADD_VV, MASK_VFWADD_VV, "ACB?k", vector},
+  {"vfwadd_vf", MATCH_VFWADD_VF, MASK_VFWADD_VF, "ACS?k", vector},
+  {"vfwredusum_vs", MATCH_VFWREDUSUM_VS, MASK_VFWREDUSUM_VS, "ACB?k", vector},
+  {"vfwsub_vv", MATCH_VFWSUB_VV, MASK_VFWSUB_VV, "ACB?k", vector},
+  {"vfwsub_vf", MATCH_VFWSUB_VF, MASK_VFWSUB_VF, "ACS?k", vector},
+  {"vfwredosum_vs", MATCH_VFWREDOSUM_VS, MASK_VFWREDOSUM_VS, "ACB?k", vector},
+  {"vfwadd_wv", MATCH_VFWADD_WV, MASK_VFWADD_WV, "ACB?k", vector},
+  {"vfwadd_wf", MATCH_VFWADD_WF, MASK_VFWADD_WF, "ACS?k", vector},
+  {"vfwsub_wv", MATCH_VFWSUB_WV, MASK_VFWSUB_WV, "ACB?k", vector},
+  {"vfwsub_wf", MATCH_VFWSUB_WF, MASK_VFWSUB_WF, "ACS?k", vector},
+  {"vfwmul_vv", MATCH_VFWMUL_VV, MASK_VFWMUL_VV, "ACB?k", vector},
+  {"vfwmul_vf", MATCH_VFWMUL_VF, MASK_VFWMUL_VF, "ACS?k", vector},
+  {"vfwmacc_vv", MATCH_VFWMACC_VV, MASK_VFWMACC_VV, "ABC?k", vector},
+  {"vfwmacc_vf", MATCH_VFWMACC_VF, MASK_VFWMACC_VF, "ASC?k", vector},
+  {"vfwnmacc_vv", MATCH_VFWNMACC_VV, MASK_VFWNMACC_VV, "ABC?k", vector},
+  {"vfwnmacc_vf", MATCH_VFWNMACC_VF, MASK_VFWNMACC_VF, "ASC?k", vector},
+  {"vfwmsac_vv", MATCH_VFWMSAC_VV, MASK_VFWMSAC_VV, "ABC?k", vector},
+  {"vfwmsac_vf", MATCH_VFWMSAC_VF, MASK_VFWMSAC_VF, "ASC?k", vector},
+  {"vfwnmsac_vv", MATCH_VFWNMSAC_VV, MASK_VFWNMSAC_VV, "ABC?k", vector},
+  {"vfwnmsac_vf", MATCH_VFWNMSAC_VF, MASK_VFWNMSAC_VF, "ASC?k", vector},
+  {"vfext_vf2", MATCH_VFEXT_VF2, MASK_VFEXT_VF2, "AC?k", zvfofp4min},
+  {"vfncvt_f_f_q", MATCH_VFNCVT_F_F_Q, MASK_VFNCVT_F_F_Q, "AC?k", zvfofp8min},
+  {"vfncvt_sat_f_f_q", MATCH_VFNCVT_SAT_F_F_Q, MASK_VFNCVT_SAT_F_F_Q, "AC?k", zvfofp8min},
+  {"vfncvtbf16_sat_f_f_w", MATCH_VFNCVTBF16_SAT_F_F_W, MASK_VFNCVTBF16_SAT_F_F_W, "AC?k", zvfofp8min},
+  {"vfncvtbf16_f_f_w", MATCH_VFNCVTBF16_F_F_W, MASK_VFNCVTBF16_F_F_W, "AC?k", zvfbfmin},
+  {"vfwcvtbf16_f_f_v", MATCH_VFWCVTBF16_F_F_V, MASK_VFWCVTBF16_F_F_V, "AC?k", zvfbfmin},
+  {"vfwmaccbf16_vv", MATCH_VFWMACCBF16_VV, MASK_VFWMACCBF16_VV, "ACB?k", zvfbfwma},
+  {"vfwmaccbf16_vf", MATCH_VFWMACCBF16_VF, MASK_VFWMACCBF16_VF, "ACS?k", zvfbfwma},
+  {"vabs_v", MATCH_VABS_V, MASK_VABS_V, "AC?k", zvabd},
+  {"vabd_vv", MATCH_VABD_VV, MASK_VABD_VV, "ACB?k", zvabd},
+  {"vabdu_vv", MATCH_VABDU_VV, MASK_VABDU_VV, "ACB?k", zvabd},
+  {"vwabda_vv", MATCH_VWABDA_VV, MASK_VWABDA_VV, "ABC?k", zvabd},
+  {"vwabdau_vv", MATCH_VWABDAU_VV, MASK_VWABDAU_VV, "ABC?k", zvabd},
+  {"vzip_vv", MATCH_VZIP_VV, MASK_VZIP_VV, "ACB?k", zvzip},
+  {"vunzipe_v", MATCH_VUNZIPE_V, MASK_VUNZIPE_V, "AC?k", zvzip},
+  {"vunzipo_v", MATCH_VUNZIPO_V, MASK_VUNZIPO_V, "AC?k", zvzip},
+  {"vpaire_vv", MATCH_VPAIRE_VV, MASK_VPAIRE_VV, "ACB?k", zvzip},
+  {"vpairo_vv", MATCH_VPAIRO_VV, MASK_VPAIRO_VV, "ACB?k", zvzip},
+  {"vandn_vv", MATCH_VANDN_VV, MASK_VANDN_VV, "ACB?k", zvbb},
+  {"vandn_vx", MATCH_VANDN_VX, MASK_VANDN_VX, "ACs?k", zvbb},
+  {"vbrev_v", MATCH_VBREV_V, MASK_VBREV_V, "AC?k", zvbb},
+  {"vbrev8_v", MATCH_VBREV8_V, MASK_VBREV8_V, "AC?k", zvbb},
+  {"vrev8_v", MATCH_VREV8_V, MASK_VREV8_V, "AC?k", zvbb},
+  {"vclz_v", MATCH_VCLZ_V, MASK_VCLZ_V, "AC?k", zvbb},
+  {"vctz_v", MATCH_VCTZ_V, MASK_VCTZ_V, "AC?k", zvbb},
+  {"vcpop_v", MATCH_VCPOP_V, MASK_VCPOP_V, "AC?k", zvbb},
+  {"vrol_vv", MATCH_VROL_VV, MASK_VROL_VV, "ACB?k", zvbb},
+  {"vrol_vx", MATCH_VROL_VX, MASK_VROL_VX, "ACs?k", zvbb},
+  {"vror_vv", MATCH_VROR_VV, MASK_VROR_VV, "ACB?k", zvbb},
+  {"vror_vx", MATCH_VROR_VX, MASK_VROR_VX, "ACs?k", zvbb},
+  {"vror_vi", MATCH_VROR_VI, MASK_VROR_VI, "AC6?k", zvbb},
+  {"vwsll_vv", MATCH_VWSLL_VV, MASK_VWSLL_VV, "ACB?k", zvbb},
+  {"vwsll_vx", MATCH_VWSLL_VX, MASK_VWSLL_VX, "ACs?k", zvbb},
+  {"vwsll_vi", MATCH_VWSLL_VI, MASK_VWSLL_VI, "ACz?k", zvbb},
+  {"vclmul_vv", MATCH_VCLMUL_VV, MASK_VCLMUL_VV, "ACB?k", zvbc},
+  {"vclmul_vx", MATCH_VCLMUL_VX, MASK_VCLMUL_VX, "ACs?k", zvbc},
+  {"vclmulh_vv", MATCH_VCLMULH_VV, MASK_VCLMULH_VV, "ACB?k", zvbc},
+  {"vclmulh_vx", MATCH_VCLMULH_VX, MASK_VCLMULH_VX, "ACs?k", zvbc},
+  {"vgmul_vv", MATCH_VGMUL_VV, MASK_VGMUL_VV, "AC?k", zvkg},
+  {"vghsh_vv", MATCH_VGHSH_VV, MASK_VGHSH_VV, "ACB?k", zvkg},
+  {"vaesz_vs", MATCH_VAESZ_VS, MASK_VAESZ_VS, "AC?k", zvkned},
+  {"vaeskf1_vi", MATCH_VAESKF1_VI, MASK_VAESKF1_VI, "ACz?k", zvkned},
+  {"vaeskf2_vi", MATCH_VAESKF2_VI, MASK_VAESKF2_VI, "ACz?k", zvkned},
+  {"vsha2ms_vv", MATCH_VSHA2MS_VV, MASK_VSHA2MS_VV, "ACB?k", zvknh},
+  {"vsha2ch_vv", MATCH_VSHA2CH_VV, MASK_VSHA2CH_VV, "ACB?k", zvknh},
+  {"vsha2cl_vv", MATCH_VSHA2CL_VV, MASK_VSHA2CL_VV, "ACB?k", zvknh},
+  {"vsm4k_vi", MATCH_VSM4K_VI, MASK_VSM4K_VI, "ACz?k", zvksed},
+  {"vsm4r_vv", MATCH_VSM4R_VV, MASK_VSM4R_VV, "AC?k", zvksed},
+  {"vsm4r_vs", MATCH_VSM4R_VS, MASK_VSM4R_VS, "AC?k", zvksed},
+  {"vsm3c_vi", MATCH_VSM3C_VI, MASK_VSM3C_VI, "ACz?k", zvksh},
+  {"vsm3me_vv", MATCH_VSM3ME_VV, MASK_VSM3ME_VV, "ACB?k", zvksh},
+  // vl1re8..vl8re64 whole-register loads
+  {"vl1re8.v", MATCH_VL1RE8_V, MASK_VL1RE8_V | (0x7ul<<29), "A(?k", vector},
+  {"vl1re16.v", MATCH_VL1RE16_V, MASK_VL1RE16_V | (0x7ul<<29), "A(?k", vector},
+  {"vl1re32.v", MATCH_VL1RE32_V, MASK_VL1RE32_V | (0x7ul<<29), "A(?k", vector},
+  {"vl1re64.v", MATCH_VL1RE64_V, MASK_VL1RE64_V | (0x7ul<<29), "A(?k", vector},
+  {"vl2re8.v", MATCH_VL2RE8_V, MASK_VL2RE8_V | (0x7ul<<29), "A(?k", vector},
+  {"vl2re16.v", MATCH_VL2RE16_V, MASK_VL2RE16_V | (0x7ul<<29), "A(?k", vector},
+  {"vl2re32.v", MATCH_VL2RE32_V, MASK_VL2RE32_V | (0x7ul<<29), "A(?k", vector},
+  {"vl2re64.v", MATCH_VL2RE64_V, MASK_VL2RE64_V | (0x7ul<<29), "A(?k", vector},
+  {"vl4re8.v", MATCH_VL4RE8_V, MASK_VL4RE8_V | (0x7ul<<29), "A(?k", vector},
+  {"vl4re16.v", MATCH_VL4RE16_V, MASK_VL4RE16_V | (0x7ul<<29), "A(?k", vector},
+  {"vl4re32.v", MATCH_VL4RE32_V, MASK_VL4RE32_V | (0x7ul<<29), "A(?k", vector},
+  {"vl4re64.v", MATCH_VL4RE64_V, MASK_VL4RE64_V | (0x7ul<<29), "A(?k", vector},
+  {"vl8re8.v", MATCH_VL8RE8_V, MASK_VL8RE8_V | (0x7ul<<29), "A(?k", vector},
+  {"vl8re16.v", MATCH_VL8RE16_V, MASK_VL8RE16_V | (0x7ul<<29), "A(?k", vector},
+  {"vl8re32.v", MATCH_VL8RE32_V, MASK_VL8RE32_V | (0x7ul<<29), "A(?k", vector},
+  {"vl8re64.v", MATCH_VL8RE64_V, MASK_VL8RE64_V | (0x7ul<<29), "A(?k", vector},
+
   // zcmop_insns
   {"c.mop.1",  MATCH_C_MOP_1,  MASK_C_MOP_1,  "", zcmop_no_zicfiss},
   {"c.mop.3",  MATCH_C_MOP_3,  MASK_C_MOP_3,  "", zcmop},
@@ -2355,7 +2780,7 @@ static const disasm_opcode_t all_insns[] = {
 #undef EXT2
 #undef EXT2_XV
 
-// -- Helper: vector extensions (complex loop-based generation) --
+// -- Helper: vector (segment load/store only — all other vector insns are in all_insns[]) --
 static void NOINLINE add_vector_insns(disassembler_t *d, const isa_parser_t *isa, bool strict)
 {
   #define DECLARE_INSN(code, match, mask) \
@@ -2363,69 +2788,35 @@ static void NOINLINE add_vector_insns(disassembler_t *d, const isa_parser_t *isa
    const uint32_t mask_##code = mask;
   #include "encoding.h"
   #undef DECLARE_INSN
+
   const uint32_t mask_nf    = 0x7Ul  << 29;
-  const uint32_t mask_wd    = 0x1Ul  << 26;
-  const uint32_t mask_vm    = 0x1Ul  << 25;
   const uint32_t mask_vldst = 0x7Ul  << 12 | 0x1UL << 28;
-  const uint32_t mask_amoop = 0x1fUl << 27;
-  const uint32_t mask_width = 0x7Ul  << 12;
 
   #define DISASM_INSN(name, code, extra, ...) \
     d->add_insn(new disasm_insn_t(name, match_##code, mask_##code | (extra), __VA_ARGS__));
-  const auto add_rtype = [&](const char *name, uint32_t match, uint32_t mask) {
-    d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1, &xrs2}));
-  };
-
-  #define DEFINE_VECTOR_V(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, opt, &vm}))
-  #define DEFINE_VECTOR_VV(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &vs1, opt, &vm}))
-  #define DEFINE_VECTOR_MULTIPLYADD_VV(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs1, &vs2, opt, &vm}))
-  #define DEFINE_VECTOR_VX(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &xrs1, opt, &vm}))
-  #define DEFINE_VECTOR_MULTIPLYADD_VX(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &xrs1, &vs2, opt, &vm}))
-  #define DEFINE_VECTOR_VF(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &frs1, opt, &vm}))
-  #define DEFINE_VECTOR_MULTIPLYADD_VF(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &frs1, &vs2, opt, &vm}))
-  #define DEFINE_VECTOR_VI(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &v_simm5, opt, &vm}))
-  #define DEFINE_VECTOR_VIU(code) \
-    d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &zimm5, opt, &vm}))
 
   if (isa->has_any_vector() || !strict) {
-    DISASM_INSN("vsetivli", vsetivli, 0, {&xrd, &zimm5, &v_vtype});
-    DISASM_INSN("vsetvli", vsetvli, 0, {&xrd, &xrs1, &v_vtype});
-    add_rtype("vsetvl", match_vsetvl, mask_vsetvl);
-
-    std::vector<const arg_t *> v_ld_unit = {&vd, &v_address, opt, &vm};
-    std::vector<const arg_t *> v_st_unit = {&vs3, &v_address, opt, &vm};
+    std::vector<const arg_t *> v_ld_unit   = {&vd, &v_address, opt, &vm};
+    std::vector<const arg_t *> v_st_unit   = {&vs3, &v_address, opt, &vm};
     std::vector<const arg_t *> v_ld_stride = {&vd, &v_address, &xrs2, opt, &vm};
     std::vector<const arg_t *> v_st_stride = {&vs3, &v_address, &xrs2, opt, &vm};
-    std::vector<const arg_t *> v_ld_index = {&vd, &v_address, &vs2, opt, &vm};
-    std::vector<const arg_t *> v_st_index = {&vs3, &v_address, &vs2, opt, &vm};
+    std::vector<const arg_t *> v_ld_index  = {&vd, &v_address, &vs2, opt, &vm};
+    std::vector<const arg_t *> v_st_index  = {&vs3, &v_address, &vs2, opt, &vm};
 
-    d->add_insn(new disasm_insn_t("vlm.v",  match_vlm_v,     mask_vlm_v, v_ld_unit));
-    d->add_insn(new disasm_insn_t("vsm.v",  match_vsm_v,     mask_vsm_v, v_st_unit));
-
-    // handle vector segment load/store
+    // Segment load/store: nf (number of fields) × element-width variants.
+    // These lack individual MATCH_* constants in encoding.h so they are
+    // generated here by OR-ing the nf and elt bits into the base constants.
     for (size_t elt = 0; elt <= 7; ++elt) {
       const custom_fmt_t template_insn[] = {
-        {match_vle8_v,   mask_vle8_v,   "vl%se%d.v",   v_ld_unit},
-        {match_vse8_v,   mask_vse8_v,   "vs%se%d.v",   v_st_unit},
-
+        {match_vle8_v,    mask_vle8_v,    "vl%se%d.v",    v_ld_unit},
+        {match_vse8_v,    mask_vse8_v,    "vs%se%d.v",    v_st_unit},
         {match_vluxei8_v, mask_vluxei8_v, "vlux%sei%d.v", v_ld_index},
         {match_vsuxei8_v, mask_vsuxei8_v, "vsux%sei%d.v", v_st_index},
-
-        {match_vlse8_v,  mask_vlse8_v,  "vls%se%d.v",  v_ld_stride},
-        {match_vsse8_v,  mask_vsse8_v,  "vss%se%d.v",  v_st_stride},
-
+        {match_vlse8_v,   mask_vlse8_v,   "vls%se%d.v",   v_ld_stride},
+        {match_vsse8_v,   mask_vsse8_v,   "vss%se%d.v",   v_st_stride},
         {match_vloxei8_v, mask_vloxei8_v, "vlox%sei%d.v", v_ld_index},
         {match_vsoxei8_v, mask_vsoxei8_v, "vsox%sei%d.v", v_st_index},
-
-        {match_vle8ff_v, mask_vle8ff_v, "vl%se%dff.v", v_ld_unit}
+        {match_vle8ff_v,  mask_vle8ff_v,  "vl%se%dff.v",  v_ld_unit},
       };
 
       reg_t elt_map[] = {0x00000000, 0x00005000, 0x00006000, 0x00007000,
@@ -2433,7 +2824,6 @@ static void NOINLINE add_vector_insns(disassembler_t *d, const isa_parser_t *isa
 
       for (unsigned nf = 0; nf <= 7; ++nf) {
         const auto seg_str = nf ? "seg" + std::to_string(nf + 1) : "";
-
         for (auto item : template_insn) {
           const reg_t match_nf = nf << 29;
           char buf[128];
@@ -2443,507 +2833,13 @@ static void NOINLINE add_vector_insns(disassembler_t *d, const isa_parser_t *isa
             ((item.match | match_nf) & ~mask_vldst) | elt_map[elt],
             item.mask | mask_nf,
             item.arg
-            ));
-        }
-      }
-
-      const custom_fmt_t template_insn2[] = {
-        {match_vl1re8_v,   mask_vl1re8_v,   "vl%dre%d.v",   v_ld_unit},
-      };
-
-      for (reg_t i = 0, nf = 7; i < 4; i++, nf >>= 1) {
-        for (auto item : template_insn2) {
-          const reg_t match_nf = nf << 29;
-          char buf[128];
-          snprintf(buf, sizeof(buf), item.fmt, nf + 1, 8 << elt);
-          d->add_insn(new disasm_insn_t(
-            buf,
-            item.match | match_nf | elt_map[elt],
-            item.mask | mask_nf,
-            item.arg
           ));
         }
       }
     }
-
-    #define DISASM_ST_WHOLE_INSN(name, nf) \
-      d->add_insn(new disasm_insn_t(#name, match_vs1r_v | (nf << 29), \
-                                        mask_vs1r_v | mask_nf, \
-                                        {&vs3, &v_address}));
-    DISASM_ST_WHOLE_INSN(vs1r.v, 0);
-    DISASM_ST_WHOLE_INSN(vs2r.v, 1);
-    DISASM_ST_WHOLE_INSN(vs4r.v, 3);
-    DISASM_ST_WHOLE_INSN(vs8r.v, 7);
-
-    #undef DISASM_ST_WHOLE_INSN
-
-    #define DEFINE_VECTOR_V(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, opt, &vm}))
-    #define DEFINE_VECTOR_VV(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &vs1, opt, &vm}))
-    #define DEFINE_VECTOR_MULTIPLYADD_VV(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs1, &vs2, opt, &vm}))
-    #define DEFINE_VECTOR_VX(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &xrs1, opt, &vm}))
-    #define DEFINE_VECTOR_MULTIPLYADD_VX(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &xrs1, &vs2, opt, &vm}))
-    #define DEFINE_VECTOR_VF(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &frs1, opt, &vm}))
-    #define DEFINE_VECTOR_MULTIPLYADD_VF(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &frs1, &vs2, opt, &vm}))
-    #define DEFINE_VECTOR_VI(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &v_simm5, opt, &vm}))
-    #define DEFINE_VECTOR_VIU(code) d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &zimm5, opt, &vm}))
-
-    #define DISASM_OPIV_VXI_INSN(name, sign, suf) \
-      DEFINE_VECTOR_VV(name##_##suf##v); \
-      DEFINE_VECTOR_VX(name##_##suf##x); \
-      if (sign) \
-        DEFINE_VECTOR_VI(name##_##suf##i); \
-      else \
-        DEFINE_VECTOR_VIU(name##_##suf##i)
-
-    #define DISASM_OPIV_VX__INSN(name, sign) \
-      DEFINE_VECTOR_VV(name##_vv); \
-      DEFINE_VECTOR_VX(name##_vx)
-
-    #define DISASM_OPIV_MULTIPLYADD_VX__INSN(name, sign) \
-      DEFINE_VECTOR_MULTIPLYADD_VV(name##_vv); \
-      DEFINE_VECTOR_MULTIPLYADD_VX(name##_vx)
-
-    #define DISASM_OPIV__XI_INSN(name, sign) \
-      DEFINE_VECTOR_VX(name##_vx); \
-      if (sign) \
-        DEFINE_VECTOR_VI(name##_vi); \
-      else \
-        DEFINE_VECTOR_VIU(name##_vi)
-
-    #define DISASM_OPIV_V___INSN(name, sign) DEFINE_VECTOR_VV(name##_vv)
-
-    #define DISASM_OPIV_S___INSN(name, sign) DEFINE_VECTOR_VV(name##_vs)
-
-    #define DISASM_OPIV_W___INSN(name, sign) \
-      DEFINE_VECTOR_VV(name##_wv); \
-      DEFINE_VECTOR_VX(name##_wx)
-
-    #define DISASM_OPIV_M___INSN(name, sign) DEFINE_VECTOR_VV(name##_mm)
-
-    #define DISASM_OPIV__X__INSN(name, sign) DEFINE_VECTOR_VX(name##_vx)
-
-    #define DISASM_OPIV_MULTIPLYADD__X__INSN(name, sign) DEFINE_VECTOR_MULTIPLYADD_VX(name##_vx)
-
-    #define DEFINE_VECTOR_VVM(name) \
-      d->add_insn(new disasm_insn_t(#name, match_##name, mask_##name | mask_vm, {&vd, &vs2, &vs1, &v0}))
-
-    #define DEFINE_VECTOR_VXM(name) \
-      d->add_insn(new disasm_insn_t(#name, match_##name, mask_##name | mask_vm, {&vd, &vs2, &xrs1, &v0}))
-
-    #define DEFINE_VECTOR_VIM(name) \
-      d->add_insn(new disasm_insn_t(#name, match_##name, mask_##name | mask_vm, {&vd, &vs2, &v_simm5, &v0}))
-
-    #define DISASM_OPIV_VXIM_INSN(name) \
-      DEFINE_VECTOR_VVM(name##_vvm); \
-      DEFINE_VECTOR_VXM(name##_vxm); \
-      DEFINE_VECTOR_VIM(name##_vim)
-
-    #define DISASM_OPIV_VX_M_INSN(name) \
-      DEFINE_VECTOR_VVM(name##_vvm); \
-      DEFINE_VECTOR_VXM(name##_vxm)
-
-    //OPFVV/OPFVF
-    //0b00_0000
-    DISASM_OPIV_VXI_INSN(vadd,         1, v);
-    DISASM_OPIV_VX__INSN(vsub,         1);
-    DISASM_OPIV__XI_INSN(vrsub,        1);
-    DISASM_OPIV_VX__INSN(vminu,        0);
-    DISASM_OPIV_VX__INSN(vmin,         1);
-    DISASM_OPIV_VX__INSN(vmaxu,        1);
-    DISASM_OPIV_VX__INSN(vmax,         0);
-    DISASM_OPIV_VXI_INSN(vand,         1, v);
-    DISASM_OPIV_VXI_INSN(vor,          1, v);
-    DISASM_OPIV_VXI_INSN(vxor,         1, v);
-    DISASM_OPIV_VXI_INSN(vrgather,     0, v);
-    DISASM_OPIV_V___INSN(vrgatherei16, 0);
-    DISASM_OPIV__XI_INSN(vslideup,     0);
-    DISASM_OPIV__XI_INSN(vslidedown,   0);
-
-    //0b01_0000
-    DISASM_OPIV_VXIM_INSN(vadc);
-    DISASM_OPIV_VX_M_INSN(vsbc);
-    DISASM_OPIV_VXIM_INSN(vmadc);
-    DISASM_OPIV_VXI_INSN(vmadc, 1, v);
-    DISASM_OPIV_VX_M_INSN(vmsbc);
-    DISASM_OPIV_VX__INSN(vmsbc, 1);
-    DISASM_OPIV_VXIM_INSN(vmerge);
-    DISASM_INSN("vmv.v.i", vmv_v_i, 0, {&vd, &v_simm5});
-    DISASM_INSN("vmv.v.v", vmv_v_v, 0, {&vd, &vs1});
-    DISASM_INSN("vmv.v.x", vmv_v_x, 0, {&vd, &xrs1});
-    DISASM_OPIV_VXI_INSN(vmseq,     1, v);
-    DISASM_OPIV_VXI_INSN(vmsne,     1, v);
-    DISASM_OPIV_VX__INSN(vmsltu,    0);
-    DISASM_OPIV_VX__INSN(vmslt,     1);
-    DISASM_OPIV_VXI_INSN(vmsleu,    0, v);
-    DISASM_OPIV_VXI_INSN(vmsle,     1, v);
-    DISASM_OPIV__XI_INSN(vmsgtu,    0);
-    DISASM_OPIV__XI_INSN(vmsgt,     1);
-
-    //0b10_0000
-    DISASM_OPIV_VXI_INSN(vsaddu,    0, v);
-    DISASM_OPIV_VXI_INSN(vsadd,     1, v);
-    DISASM_OPIV_VX__INSN(vssubu,    0);
-    DISASM_OPIV_VX__INSN(vssub,     1);
-    DISASM_OPIV_VXI_INSN(vsll,      1, v);
-    DISASM_INSN("vmv1r.v", vmv1r_v, 0, {&vd, &vs2});
-    DISASM_INSN("vmv2r.v", vmv2r_v, 0, {&vd, &vs2});
-    DISASM_INSN("vmv4r.v", vmv4r_v, 0, {&vd, &vs2});
-    DISASM_INSN("vmv8r.v", vmv8r_v, 0, {&vd, &vs2});
-    DISASM_OPIV_VX__INSN(vsmul,     1);
-    DISASM_OPIV_VXI_INSN(vsrl,      0, v);
-    DISASM_OPIV_VXI_INSN(vsra,      0, v);
-    DISASM_OPIV_VXI_INSN(vssrl,     0, v);
-    DISASM_OPIV_VXI_INSN(vssra,     0, v);
-    DISASM_OPIV_VXI_INSN(vnsrl,     0, w);
-    DISASM_OPIV_VXI_INSN(vnsra,     0, w);
-    DISASM_OPIV_VXI_INSN(vnclipu,   0, w);
-    DISASM_OPIV_VXI_INSN(vnclip,    0, w);
-
-    //0b11_0000
-    DISASM_OPIV_S___INSN(vwredsumu, 0);
-    DISASM_OPIV_S___INSN(vwredsum,  1);
-
-    //OPMVV/OPMVX
-    //0b00_0000
-    DISASM_OPIV_VX__INSN(vaaddu,    0);
-    DISASM_OPIV_VX__INSN(vaadd,     0);
-    DISASM_OPIV_VX__INSN(vasubu,    0);
-    DISASM_OPIV_VX__INSN(vasub,     0);
-
-    DISASM_OPIV_S___INSN(vredsum,   1);
-    DISASM_OPIV_S___INSN(vredand,   1);
-    DISASM_OPIV_S___INSN(vredor,    1);
-    DISASM_OPIV_S___INSN(vredxor,   1);
-    DISASM_OPIV_S___INSN(vredminu,  0);
-    DISASM_OPIV_S___INSN(vredmin,   1);
-    DISASM_OPIV_S___INSN(vredmaxu,  0);
-    DISASM_OPIV_S___INSN(vredmax,   1);
-    DISASM_OPIV__X__INSN(vslide1up,  1);
-    DISASM_OPIV__X__INSN(vslide1down,1);
-
-    //0b01_0000
-    //VWXUNARY0
-    DISASM_INSN("vmv.x.s", vmv_x_s, 0, {&xrd, &vs2});
-    DISASM_INSN("vcpop.m", vcpop_m, 0, {&xrd, &vs2, opt, &vm});
-    DISASM_INSN("vfirst.m", vfirst_m, 0, {&xrd, &vs2, opt, &vm});
-
-    //VRXUNARY0
-    DISASM_INSN("vmv.s.x", vmv_s_x, 0, {&vd, &xrs1});
-
-    //VXUNARY0
-    DEFINE_VECTOR_V(vzext_vf2);
-    DEFINE_VECTOR_V(vsext_vf2);
-    DEFINE_VECTOR_V(vzext_vf4);
-    DEFINE_VECTOR_V(vsext_vf4);
-    DEFINE_VECTOR_V(vzext_vf8);
-    DEFINE_VECTOR_V(vsext_vf8);
-
-    //VMUNARY0
-    DEFINE_VECTOR_V(vmsbf_m);
-    DEFINE_VECTOR_V(vmsof_m);
-    DEFINE_VECTOR_V(vmsif_m);
-    DEFINE_VECTOR_V(viota_m);
-    DISASM_INSN("vid.v", vid_v, 0, {&vd, opt, &vm});
-
-    DISASM_INSN("vid.v", vid_v, 0, {&vd, opt, &vm});
-
-    DISASM_INSN("vcompress.vm", vcompress_vm, 0, {&vd, &vs2, &vs1});
-
-    DISASM_OPIV_M___INSN(vmandn,    1);
-    DISASM_OPIV_M___INSN(vmand,     1);
-    DISASM_OPIV_M___INSN(vmor,      1);
-    DISASM_OPIV_M___INSN(vmxor,     1);
-    DISASM_OPIV_M___INSN(vmorn,     1);
-    DISASM_OPIV_M___INSN(vmnand,    1);
-    DISASM_OPIV_M___INSN(vmnor,     1);
-    DISASM_OPIV_M___INSN(vmxnor,    1);
-
-    //0b10_0000
-    DISASM_OPIV_VX__INSN(vdivu,     0);
-    DISASM_OPIV_VX__INSN(vdiv,      1);
-    DISASM_OPIV_VX__INSN(vremu,     0);
-    DISASM_OPIV_VX__INSN(vrem,      1);
-    DISASM_OPIV_VX__INSN(vmulhu,    0);
-    DISASM_OPIV_VX__INSN(vmul,      1);
-    DISASM_OPIV_VX__INSN(vmulhsu,   0);
-    DISASM_OPIV_VX__INSN(vmulh,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vmadd,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vnmsub,    1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vmacc,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vnmsac,    1);
-
-    //0b11_0000
-    DISASM_OPIV_VX__INSN(vwaddu,    0);
-    DISASM_OPIV_VX__INSN(vwadd,     1);
-    DISASM_OPIV_VX__INSN(vwsubu,    0);
-    DISASM_OPIV_VX__INSN(vwsub,     1);
-    DISASM_OPIV_W___INSN(vwaddu,    0);
-    DISASM_OPIV_W___INSN(vwadd,     1);
-    DISASM_OPIV_W___INSN(vwsubu,    0);
-    DISASM_OPIV_W___INSN(vwsub,     1);
-    DISASM_OPIV_VX__INSN(vwmulu,    0);
-    DISASM_OPIV_VX__INSN(vwmulsu,   0);
-    DISASM_OPIV_VX__INSN(vwmul,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vwmaccu,   0);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vwmacc,    1);
-    DISASM_OPIV_MULTIPLYADD__X__INSN(vwmaccus,  1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vwmaccsu,  0);
-
-    if (ext_enabled(EXT_ZVQDOTQ)) {
-      DISASM_OPIV_VX__INSN(vqdot,   0);
-      DISASM_OPIV_VX__INSN(vqdotu,  0);
-      DISASM_OPIV_VX__INSN(vqdotsu, 0);
-      DISASM_OPIV__X__INSN(vqdotus, 0);
-    }
-
-    #undef DISASM_OPIV_VXI_INSN
-    #undef DISASM_OPIV_VX__INSN
-    #undef DISASM_OPIV__XI_INSN
-    #undef DISASM_OPIV_V___INSN
-    #undef DISASM_OPIV_S___INSN
-    #undef DISASM_OPIV_W___INSN
-    #undef DISASM_OPIV_M___INSN
-    #undef DISASM_OPIV__X__INSN
-    #undef DISASM_OPIV_VXIM_INSN
-    #undef DISASM_OPIV_VX_M_INSN
-
-    #define DISASM_OPIV_VF_INSN(name) \
-      DEFINE_VECTOR_VV(name##_vv); \
-      DEFINE_VECTOR_VF(name##_vf)
-
-    #define DISASM_OPIV_MULTIPLYADD_VF_INSN(name) \
-      DEFINE_VECTOR_MULTIPLYADD_VV(name##_vv); \
-      DEFINE_VECTOR_MULTIPLYADD_VF(name##_vf)
-
-    #define DISASM_OPIV_WF_INSN(name) \
-      DEFINE_VECTOR_VV(name##_wv); \
-      DEFINE_VECTOR_VF(name##_wf)
-
-    #define DISASM_OPIV_S__INSN(name) \
-      DEFINE_VECTOR_VV(name##_vs)
-
-    #define DISASM_OPIV__F_INSN(name) \
-      DEFINE_VECTOR_VF(name##_vf)
-
-    #define DISASM_VFUNARY0_INSN(name, suf) \
-      DEFINE_VECTOR_V(name##cvt_rtz_xu_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_rtz_x_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_xu_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_x_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_f_xu_##suf); \
-      DEFINE_VECTOR_V(name##cvt_f_x_##suf)
-
-    //OPFVV/OPFVF
-    //0b00_0000
-    DISASM_OPIV_VF_INSN(vfadd);
-    DISASM_OPIV_S__INSN(vfredusum);
-    DISASM_OPIV_VF_INSN(vfsub);
-    DISASM_OPIV_S__INSN(vfredosum);
-    DISASM_OPIV_VF_INSN(vfmin);
-    DISASM_OPIV_S__INSN(vfredmin);
-    DISASM_OPIV_VF_INSN(vfmax);
-    DISASM_OPIV_S__INSN(vfredmax);
-    DISASM_OPIV_VF_INSN(vfsgnj);
-    DISASM_OPIV_VF_INSN(vfsgnjn);
-    DISASM_OPIV_VF_INSN(vfsgnjx);
-    DISASM_INSN("vfmv.f.s", vfmv_f_s, 0, {&frd, &vs2});
-    DISASM_INSN("vfmv.s.f", vfmv_s_f, mask_vfmv_s_f, {&vd, &frs1});
-    DISASM_OPIV__F_INSN(vfslide1up);
-    DISASM_OPIV__F_INSN(vfslide1down);
-
-    //0b01_0000
-    DISASM_INSN("vfmerge.vfm", vfmerge_vfm, 0, {&vd, &vs2, &frs1, &v0});
-    DISASM_INSN("vfmv.v.f", vfmv_v_f, 0, {&vd, &frs1});
-    DISASM_OPIV_VF_INSN(vmfeq);
-    DISASM_OPIV_VF_INSN(vmfle);
-    DISASM_OPIV_VF_INSN(vmflt);
-    DISASM_OPIV_VF_INSN(vmfne);
-    DISASM_OPIV__F_INSN(vmfgt);
-    DISASM_OPIV__F_INSN(vmfge);
-
-    //0b10_0000
-    DISASM_OPIV_VF_INSN(vfdiv);
-    DISASM_OPIV__F_INSN(vfrdiv);
-
-    //vfunary0
-    DISASM_VFUNARY0_INSN(vf,  v);
-    DISASM_VFUNARY0_INSN(vfw, v);
-    DEFINE_VECTOR_V(vfwcvt_f_f_v);
-
-    DISASM_VFUNARY0_INSN(vfn, w);
-    DEFINE_VECTOR_V(vfncvt_f_f_w);
-    DEFINE_VECTOR_V(vfncvt_rod_f_f_w);
-
-    //vfunary1
-    DEFINE_VECTOR_V(vfsqrt_v);
-    DEFINE_VECTOR_V(vfrsqrt7_v);
-    DEFINE_VECTOR_V(vfrec7_v);
-    DEFINE_VECTOR_V(vfclass_v);
-
-    DISASM_OPIV_VF_INSN(vfmul);
-    DISASM_OPIV__F_INSN(vfrsub);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmadd);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmadd);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmsub);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmsub);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmsac);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmsac);
-
-    //0b11_0000
-    DISASM_OPIV_VF_INSN(vfwadd);
-    DISASM_OPIV_S__INSN(vfwredusum);
-    DISASM_OPIV_VF_INSN(vfwsub);
-    DISASM_OPIV_S__INSN(vfwredosum);
-    DISASM_OPIV_WF_INSN(vfwadd);
-    DISASM_OPIV_WF_INSN(vfwsub);
-    DISASM_OPIV_VF_INSN(vfwmul);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwnmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwmsac);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwnmsac);
-
-    #undef DISASM_OPIV_VF_INSN
-    #undef DISASM_OPIV__F_INSN
-    #undef DISASM_OPIV_S__INSN
-    #undef DISASM_OPIV_W__INSN
-    #undef DISASM_VFUNARY0_INSN
-  }
-
-  if (ext_enabled(EXT_ZVFOFP4MIN)) {
-    DEFINE_VECTOR_V(vfext_vf2);
-  }
-
-  if (ext_enabled(EXT_ZVFOFP8MIN)) {
-    DEFINE_VECTOR_V(vfncvt_f_f_q);
-    DEFINE_VECTOR_V(vfncvt_sat_f_f_q);
-    DEFINE_VECTOR_V(vfncvtbf16_sat_f_f_w);
-  }
-
-  if (ext_enabled(EXT_ZVFBFMIN)) {
-    DEFINE_VECTOR_V(vfncvtbf16_f_f_w);
-    DEFINE_VECTOR_V(vfwcvtbf16_f_f_v);
-  }
-
-  if (ext_enabled(EXT_ZVFBFWMA)) {
-    DEFINE_VECTOR_VV(vfwmaccbf16_vv);
-    DEFINE_VECTOR_VF(vfwmaccbf16_vf);
-  }
-
-  if (ext_enabled(EXT_ZVABD)) {
-    DEFINE_VECTOR_V(vabs_v);
-    DEFINE_VECTOR_VV(vabd_vv);
-    DEFINE_VECTOR_VV(vabdu_vv);
-    DEFINE_VECTOR_MULTIPLYADD_VV(vwabda_vv);
-    DEFINE_VECTOR_MULTIPLYADD_VV(vwabdau_vv);
-  }
-
-  if (ext_enabled(EXT_ZVZIP)) {
-    DEFINE_VECTOR_VV(vzip_vv);
-    DEFINE_VECTOR_V(vunzipe_v);
-    DEFINE_VECTOR_V(vunzipo_v);
-    DEFINE_VECTOR_VV(vpaire_vv);
-    DEFINE_VECTOR_VV(vpairo_vv);
-  }
-
-  if (ext_enabled(EXT_ZVBB)) {
-#define DEFINE_VECTOR_VIU_ZIMM6(code) \
-  d->add_insn(new disasm_insn_t(#code, match_##code, mask_##code, {&vd, &vs2, &v_zimm6, opt, &vm}))
-#define DISASM_VECTOR_VV_VX(name) \
-  DEFINE_VECTOR_VV(name##_vv); \
-  DEFINE_VECTOR_VX(name##_vx)
-#define DISASM_VECTOR_VV_VX_VIU(name) \
-  DEFINE_VECTOR_VV(name##_vv); \
-  DEFINE_VECTOR_VX(name##_vx); \
-  DEFINE_VECTOR_VIU(name##_vi)
-#define DISASM_VECTOR_VV_VX_VIU_ZIMM6(name) \
-  DEFINE_VECTOR_VV(name##_vv); \
-  DEFINE_VECTOR_VX(name##_vx); \
-  DEFINE_VECTOR_VIU_ZIMM6(name##_vi)
-
-    DISASM_VECTOR_VV_VX(vandn);
-    DEFINE_VECTOR_V(vbrev_v);
-    DEFINE_VECTOR_V(vbrev8_v);
-    DEFINE_VECTOR_V(vrev8_v);
-    DEFINE_VECTOR_V(vclz_v);
-    DEFINE_VECTOR_V(vctz_v);
-    DEFINE_VECTOR_V(vcpop_v);
-    DISASM_VECTOR_VV_VX(vrol);
-    DISASM_VECTOR_VV_VX_VIU_ZIMM6(vror);
-    DISASM_VECTOR_VV_VX_VIU(vwsll);
-
-#undef DEFINE_VECTOR_VIU_ZIMM6
-#undef DISASM_VECTOR_VV_VX
-#undef DISASM_VECTOR_VV_VX_VIU
-#undef DISASM_VECTOR_VV_VX_VIU_ZIMM6
-    }
-
-  if (ext_enabled(EXT_ZVBC)) {
-#define DISASM_VECTOR_VV_VX(name) \
-    DEFINE_VECTOR_VV(name##_vv); \
-    DEFINE_VECTOR_VX(name##_vx)
-
-    DISASM_VECTOR_VV_VX(vclmul);
-    DISASM_VECTOR_VV_VX(vclmulh);
-
-#undef DISASM_VECTOR_VV_VX
-  }
-
-  if (ext_enabled(EXT_ZVKG)) {
-    // Despite its suffix, the vgmul.vv instruction
-    // is really ".v", with the form "vgmul.vv vd, vs2".
-    DEFINE_VECTOR_V(vgmul_vv);
-    DEFINE_VECTOR_VV(vghsh_vv);
-  }
-
-  if (ext_enabled(EXT_ZVKNED)) {
-    // Despite their suffixes, the vaes*.{vv,vs} instructions
-    // are really ".v", with the form "<op>.{vv,vs} vd, vs2".
-#define DISASM_VECTOR_VV_VS(name) \
-    DEFINE_VECTOR_V(name##_vv); \
-    DEFINE_VECTOR_V(name##_vs)
-
-    DISASM_VECTOR_VV_VS(vaesdm);
-    DISASM_VECTOR_VV_VS(vaesdf);
-    DISASM_VECTOR_VV_VS(vaesem);
-    DISASM_VECTOR_VV_VS(vaesef);
-
-    DEFINE_VECTOR_V(vaesz_vs);
-    DEFINE_VECTOR_VIU(vaeskf1_vi);
-    DEFINE_VECTOR_VIU(vaeskf2_vi);
-#undef DISASM_VECTOR_VV_VS
-  }
-
-  if (ext_enabled(EXT_ZVKNHA) || ext_enabled(EXT_ZVKNHB)) {
-    DEFINE_VECTOR_VV(vsha2ms_vv);
-    DEFINE_VECTOR_VV(vsha2ch_vv);
-    DEFINE_VECTOR_VV(vsha2cl_vv);
-  }
-
-  if (ext_enabled(EXT_ZVKSED)) {
-    DEFINE_VECTOR_VIU(vsm4k_vi);
-    // Despite their suffixes, the vsm4r.{vv,vs} instructions
-    // are really ".v", with the form "vsm4r.{vv,vs} vd, vs2".
-    DEFINE_VECTOR_V(vsm4r_vv);
-    DEFINE_VECTOR_V(vsm4r_vs);
-  }
-
-  if (ext_enabled(EXT_ZVKSH)) {
-    DEFINE_VECTOR_VIU(vsm3c_vi);
-    DEFINE_VECTOR_VV(vsm3me_vv);
   }
 
   #undef DISASM_INSN
-  #undef DEFINE_VECTOR_V
-  #undef DEFINE_VECTOR_VV
-  #undef DEFINE_VECTOR_MULTIPLYADD_VV
-  #undef DEFINE_VECTOR_VX
-  #undef DEFINE_VECTOR_MULTIPLYADD_VX
-  #undef DEFINE_VECTOR_VF
-  #undef DEFINE_VECTOR_MULTIPLYADD_VF
-  #undef DEFINE_VECTOR_VI
-  #undef DEFINE_VECTOR_VIU
 }
 
 void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
@@ -3018,3 +2914,4 @@ disassembler_t::~disassembler_t()
     for (size_t j = 0; j < chain[i].size(); j++)
       delete chain[i][j];
 }
+
