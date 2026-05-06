@@ -648,12 +648,6 @@ static void NOINLINE add_unknown_insns(disassembler_t* d)
   #undef DECLARE_INSN
 }
 
-#define ext_enabled_strict(x) (isa->extension_enabled(x))
-#define ext_enabled(x) (ext_enabled_strict(x) || !strict)
-#define xlen_eq(x) (xlen_eq_strict(x) || !strict)
-#define xlen_eq_strict(x) (isa->get_max_xlen() == (x))
-
-
 // ---------------------------------------------------------------------------
 // insn_class: extension conditions for the flat opcode table.
 // Mirrors binutils' riscv_insn_class — each value names the ISA subset that
