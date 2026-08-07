@@ -1,6 +1,3 @@
-get_insn_list = $(shell grep ^DECLARE_INSN $(1) | sed 's/DECLARE_INSN(\(.*\),.*,.*)/\1/')
-get_opcode = $(shell grep ^DECLARE_INSN.*\\\<$(2)\\\> $(1) | sed 's/DECLARE_INSN(.*,\(.*\),.*)/\1/')
-
 riscv_subproject_deps = \
 	fdt \
 	disasm \
@@ -1803,6 +1800,7 @@ riscv_insn_list = \
 	$(riscv_insn_ext_zicfiss) \
 
 riscv_gen_srcs = $(addsuffix .cc,$(riscv_insn_list))
+riscv_insn_cc_stamp = .riscv_insn_cc.stamp
 
 insn_list.h: $(src_dir)/riscv/riscv.mk.in
 	for insn in $(foreach insn,$(riscv_insn_list),$(subst .,_,$(insn))) ; do \
@@ -1810,8 +1808,19 @@ insn_list.h: $(src_dir)/riscv/riscv.mk.in
 	done > $@.tmp
 	mv $@.tmp $@
 
-$(riscv_gen_srcs): %.cc: insns/%.h insn_template.cc
-	sed 's/NAME/$(subst .cc,,$@)/' $(src_dir)/riscv/insn_template.cc | sed 's/OPCODE/$(call get_opcode,$(src_dir)/riscv/encoding.h,$(subst .cc,,$@))/' > $@
+$(riscv_insn_cc_stamp): $(src_dir)/riscv/insn_template.cc \
+		$(src_dir)/riscv/encoding.h \
+		$(src_dir)/riscv/riscv.mk.in \
+		$(src_dir)/scripts/gen-insn-cc
+	@printf '%s\n' $(riscv_insn_list) | $(src_dir)/scripts/gen-insn-cc \
+		$(src_dir)/riscv/insn_template.cc $(src_dir)/riscv/encoding.h .
+	@touch $@
+
+$(riscv_gen_srcs): | $(riscv_insn_cc_stamp)
+	@test -f $@ || { rm -f $(riscv_insn_cc_stamp); $(MAKE) $(riscv_insn_cc_stamp); test -f $@; }
+
+$(patsubst %.cc,%.o,$(riscv_gen_srcs)): %.o: $(src_dir)/riscv/insns/%.h
 
 riscv_junk = \
 	$(riscv_gen_srcs) \
+	$(riscv_insn_cc_stamp) \

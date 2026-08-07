@@ -1,0 +1,90 @@
+#!/bin/sh
+# Generate per-instruction .cc files from insn_template.cc.
+# Usage: gen-insn-cc TEMPLATE ENCODING OUTDIR  (insn names on stdin)
+
+set -e
+
+if [ "$#" -ne 3 ]; then
+  echo "usage: $0 TEMPLATE ENCODING OUTDIR" >&2
+  exit 2
+fi
+
+template=$1
+encoding=$2
+outdir=$3
+
+if [ ! -f "$template" ]; then
+  echo "gen-insn-cc: template not found: $template" >&2
+  exit 1
+fi
+
+if [ ! -f "$encoding" ]; then
+  echo "gen-insn-cc: encoding header not found: $encoding" >&2
+  exit 1
+fi
+
+mkdir -p "$outdir"
+
+awk -v template="$template" -v encoding="$encoding" -v outdir="$outdir" '
+function read_file(path,    text, line, rc) {
+  text = ""
+  while ((rc = (getline line < path)) > 0)
+    text = text line "\n"
+  close(path)
+  if (rc < 0) {
+    printf "gen-insn-cc: failed to read %s\n", path > "/dev/stderr"
+    exit 1
+  }
+  return text
+}
+
+BEGIN {
+  tmpl = read_file(template)
+
+  while ((rc = (getline line < encoding)) > 0) {
+    if (index(line, "DECLARE_INSN(") != 1)
+      continue
+    line = substr(line, length("DECLARE_INSN(") + 1)
+    n = split(line, parts, ",")
+    if (n < 2)
+      continue
+    name = parts[1]
+    match_op = parts[2]
+    gsub(/^[ \t]+|[ \t]+$/, "", name)
+    gsub(/^[ \t]+|[ \t]+$/, "", match_op)
+    op[name] = match_op
+  }
+  close(encoding)
+  if (rc < 0) {
+    printf "gen-insn-cc: failed to read %s\n", encoding > "/dev/stderr"
+    exit 1
+  }
+}
+
+NF == 0 { next }
+
+{
+  name = $1
+  if (!(name in op)) {
+    printf "gen-insn-cc: no DECLARE_INSN for \"%s\" in %s\n", name, encoding > "/dev/stderr"
+    exit 1
+  }
+
+  text = tmpl
+  gsub(/NAME/, name, text)
+  gsub(/OPCODE/, op[name], text)
+
+  path = outdir "/" name ".cc"
+
+  existing = ""
+  while ((rc = (getline line < path)) > 0)
+    existing = existing line "\n"
+  close(path)
+
+  if (existing == text)
+    next
+
+  printf "%s", text > path
+  close(path)
+}
+'
