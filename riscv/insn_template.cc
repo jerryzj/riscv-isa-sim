@@ -1,7 +1,18 @@
 // See LICENSE for license details.
 
+#if !defined(NAME) || !defined(OPCODE)
+#error "Compile insn_template.cc with -DNAME=<insn> and -DOPCODE=<match>"
+#endif
+
 #include "insn_template.h"
 #include "insn_macros.h"
+
+#define INSN_CONCAT2(a, b) a##b
+#define INSN_CONCAT(a, b) INSN_CONCAT2(a, b)
+#define INSN_FN(prefix) INSN_CONCAT(prefix, NAME)
+
+#define INSN_XSTR(x) #x
+#define INSN_HEADER(n) INSN_XSTR(insns/n.h)
 
 #define DECODE_MACRO_USAGE_LOGGED 0
 
@@ -13,20 +24,20 @@
   trace_opcode(p, OPCODE, insn); \
   return npc
 
-reg_t fast_rv32i_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(fast_rv32i_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 32
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }
 
-reg_t fast_rv64i_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(fast_rv64i_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 64
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }
@@ -34,20 +45,20 @@ reg_t fast_rv64i_NAME(processor_t* p, insn_t insn, reg_t pc)
 #undef DECODE_MACRO_USAGE_LOGGED
 #define DECODE_MACRO_USAGE_LOGGED 1
 
-reg_t logged_rv32i_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(logged_rv32i_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 32
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }
 
-reg_t logged_rv64i_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(logged_rv64i_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 64
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }
@@ -58,20 +69,20 @@ reg_t logged_rv64i_NAME(processor_t* p, insn_t insn, reg_t pc)
 #undef DECODE_MACRO_USAGE_LOGGED
 #define DECODE_MACRO_USAGE_LOGGED 0
 
-reg_t fast_rv32e_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(fast_rv32e_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 32
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }
 
-reg_t fast_rv64e_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(fast_rv64e_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 64
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }
@@ -79,20 +90,20 @@ reg_t fast_rv64e_NAME(processor_t* p, insn_t insn, reg_t pc)
 #undef DECODE_MACRO_USAGE_LOGGED
 #define DECODE_MACRO_USAGE_LOGGED 1
 
-reg_t logged_rv32e_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(logged_rv32e_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 32
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }
 
-reg_t logged_rv64e_NAME(processor_t* p, insn_t insn, reg_t pc)
+reg_t INSN_FN(logged_rv64e_)(processor_t* p, insn_t insn, reg_t pc)
 {
   #define xlen 64
   PROLOGUE;
-  #include "insns/NAME.h"
+  #include INSN_HEADER(NAME)
   EPILOGUE;
   #undef xlen
 }

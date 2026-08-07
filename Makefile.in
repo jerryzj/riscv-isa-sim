@@ -213,14 +213,15 @@ _$(1).cc :
 # Build the object files for this subproject
 
 $(2)_pch := $$(patsubst %.h, %.h.gch, $$($(2)_precompiled_hdrs))
-$(2)_objs := $$(patsubst %.cc, %.o, $$($(2)_srcs))
+$(2)_src_objs := $$(patsubst %.cc, %.o, $$($(2)_srcs))
+$(2)_objs := $$($(2)_src_objs) $$($(2)_extra_objs)
 $(2)_c_objs := $$(patsubst %.c, %.o, $$($(2)_c_srcs))
 $(2)_deps := $$(patsubst %.o, %.d, $$($(2)_objs))
 $(2)_deps += $$(patsubst %.o, %.d, $$($(2)_c_objs))
 $(2)_deps += $$(patsubst %.h, %.h.d, $$($(2)_precompiled_hdrs))
 $$($(2)_pch) : %.h.gch : %.h
 	$(COMPILE) -x c++-header $$< -c -o $$@ -MF $$(patsubst %.gch,%.d,$$@)
-$$($(2)_objs) : %.o : %.cc $$($(2)_gen_hdrs) $$($(2)_pch)
+$$($(2)_src_objs) : %.o : %.cc $$($(2)_gen_hdrs) $$($(2)_pch)
 	$(COMPILE) $(if $(HAVE_CLANG_PCH), $$(if $$($(2)_pch), -include-pch $$($(2)_pch))) $$($(2)_CFLAGS) -c $$< -o $$@ -MF $$(patsubst %.o,%.d,$$@)
 $$($(2)_c_objs) : %.o : %.c $$($(2)_gen_hdrs)
 	$(COMPILE_C) $$($(2)_CFLAGS) -c $$< -o $$@ -MF $$(patsubst %.o,%.d,$$@)

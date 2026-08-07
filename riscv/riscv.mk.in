@@ -1,6 +1,3 @@
-get_insn_list = $(shell grep ^DECLARE_INSN $(1) | sed 's/DECLARE_INSN(\(.*\),.*,.*)/\1/')
-get_opcode = $(shell grep ^DECLARE_INSN.*\\\<$(2)\\\> $(1) | sed 's/DECLARE_INSN(.*,\(.*\),.*)/\1/')
-
 riscv_subproject_deps = \
 	fdt \
 	disasm \
@@ -78,7 +75,6 @@ riscv_srcs = \
 	vector_unit.cc \
 	socketif.cc \
 	cfg.cc \
-	$(riscv_gen_srcs) \
 
 riscv_test_srcs = \
   check-opcode-overlap.t.cc \
@@ -1802,7 +1798,7 @@ riscv_insn_list = \
 	$(riscv_insn_ext_zicfilp) \
 	$(riscv_insn_ext_zicfiss) \
 
-riscv_gen_srcs = $(addsuffix .cc,$(riscv_insn_list))
+riscv_extra_objs = $(addsuffix .o,$(riscv_insn_list))
 
 insn_list.h: $(src_dir)/riscv/riscv.mk.in
 	for insn in $(foreach insn,$(riscv_insn_list),$(subst .,_,$(insn))) ; do \
@@ -1810,8 +1806,11 @@ insn_list.h: $(src_dir)/riscv/riscv.mk.in
 	done > $@.tmp
 	mv $@.tmp $@
 
-$(riscv_gen_srcs): %.cc: insns/%.h insn_template.cc
-	sed 's/NAME/$(subst .cc,,$@)/' $(src_dir)/riscv/insn_template.cc | sed 's/OPCODE/$(call get_opcode,$(src_dir)/riscv/encoding.h,$(subst .cc,,$@))/' > $@
-
-riscv_junk = \
-	$(riscv_gen_srcs) \
+$(riscv_extra_objs): %.o: $(src_dir)/riscv/insn_template.cc \
+		$(src_dir)/riscv/insns/%.h \
+		$(src_dir)/riscv/insn_template.h \
+		insn_list.h \
+		$(patsubst %,%.gch,$(riscv_precompiled_hdrs))
+	$(COMPILE) $(if $(HAVE_CLANG_PCH),$(if $(riscv_pch),-include-pch $(riscv_pch))) $(riscv_CFLAGS) \
+		-DNAME=$* -DOPCODE=MATCH_$(shell echo $* | tr 'a-z' 'A-Z') \
+		-c $(src_dir)/riscv/insn_template.cc -o $@ -MF $*.d
