@@ -12,6 +12,9 @@
 #   a preceding call to AX_BOOST_BASE. Further documentation is available at
 #   <http://randspringer.de/boost/index.html>.
 #
+#   Boost.Regex may be header-only; if the headers compile but no compiled
+#   library is found, BOOST_REGEX_LIB is empty.
+#
 #   This macro calls:
 #
 #     AC_SUBST(BOOST_REGEX_LIB)
@@ -30,7 +33,7 @@
 #   and this notice are preserved. This file is offered as-is, without any
 #   warranty.
 
-#serial 23
+#serial 24
 
 AC_DEFUN([AX_BOOST_REGEX],
 [
@@ -98,9 +101,11 @@ AC_DEFUN([AX_BOOST_REGEX],
                done
             fi
             if test "x$ax_lib" = "x"; then
-                AC_MSG_ERROR(Could not find a version of the Boost::Regex library!)
-            fi
-			if test "x$link_regex" != "xyes"; then
+                # Boost.Regex may be header-only (no libboost_regex).
+                BOOST_REGEX_LIB=""
+                AC_SUBST(BOOST_REGEX_LIB)
+                AC_MSG_NOTICE([Boost::Regex is header-only; no library to link])
+            elif test "x$link_regex" != "xyes"; then
 				AC_MSG_ERROR(Could not link against $ax_lib !)
 			fi
 		fi
