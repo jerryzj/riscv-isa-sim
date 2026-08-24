@@ -65,14 +65,16 @@ entry_loop:
         jal  zero, entry_loop
 
 _exception:
-        // Restore S0, which we always save to dscratch.
+        // Restore S0 and S1, which we always save to dscratch.
         // We need this in case the user tried an abstract write to a
-        // non-existent CSR.
+        // non-existent CSR, or the abstract command was an Access Memory
+        // command (which also uses S1 as scratch).
 
 
         // Let debug module know you got an exception.
         MEMORY_ACCESS_WITH_MPRV(
-          csrr s0, CSR_DSCRATCH0; 
+          csrr s0, CSR_DSCRATCH0;
+          csrr s1, CSR_DSCRATCH1;
           sw zero, DEBUG_ROM_EXCEPTION(zero);
         )
 
