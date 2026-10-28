@@ -10,6 +10,7 @@
 #include <sstream>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
 
 extern const char* xpr_name[NXPR];
 extern const char* fpr_name[NFPR];
@@ -92,20 +93,23 @@ class disassembler_t
   void add_insn(disasm_insn_t* insn);
 
  private:
-  static const int HASH_SIZE = 255;
-  std::vector<const disasm_insn_t*> chain[HASH_SIZE+1];
+  // Each instruction is indexed under the first of these keys that its mask
+  // covers (opcode+funct3+funct6, opcode+funct3, opcode, RVC quadrant+funct3,
+  // anything); lookup() probes every level and the highest priority wins.
+  static constexpr uint32_t key_masks[] = {0xfc00707f, 0x707f, 0x7f, 0xe003, 0};
+  static constexpr size_t LEVELS = sizeof(key_masks) / sizeof(key_masks[0]);
+
+  struct entry_t {
+    int64_t prio; // lower wins
+    const disasm_insn_t* insn;
+  };
+  // each list is sorted by priority
+  std::unordered_map<uint32_t, std::vector<entry_t>> index[LEVELS];
+  int64_t next_prio = 0; // built-in instructions: first added wins
+  int64_t top_prio = 0;  // added after construction: beat everything, latest first
+  bool built = false;
 
   void add_instructions(const isa_parser_t* isa, bool strict);
-
-  const disasm_insn_t* probe_once(insn_t insn, size_t idx) const;
-
-  static const unsigned int MASK1 = 0x7f;
-  static const unsigned int MASK2 = 0xe003;
-
-  static unsigned int hash(insn_bits_t insn, unsigned int mask)
-  {
-    return (insn & mask) % HASH_SIZE;
-  }
 };
 
 #endif

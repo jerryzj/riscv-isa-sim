@@ -13,6 +13,7 @@
 #include "platform.h"
 #include <cassert>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <initializer_list>
 #include <map>
@@ -21,8 +22,6 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
-// For std::reverse:
-#include <algorithm>
 
 #ifdef __GNUC__
 # pragma GCC diagnostic ignored "-Wunused-variable"
@@ -2635,45 +2634,62 @@ disassembler_t::disassembler_t(const isa_parser_t *isa, bool strict)
     add_unknown_insns(this);
   }
 
-  // Now, reverse the lists, because we search them back-to-front (so that
-  // custom instructions later added with add_insn have highest priority).
-  for (size_t i = 0; i < HASH_SIZE+1; i++)
-    std::reverse(chain[i].begin(), chain[i].end());
-}
-
-const disasm_insn_t* disassembler_t::probe_once(insn_t insn, size_t idx) const
-{
-  for (auto it = chain[idx].rbegin(); it != chain[idx].rend(); ++it)
-    if (*(*it) == insn)
-      return *it;
-
-  return NULL;
+  built = true;
 }
 
 const disasm_insn_t* disassembler_t::lookup(insn_t insn) const
 {
-  if (auto p = probe_once(insn, hash(insn.bits(), MASK1)))
-    return p;
+  const disasm_insn_t* best = nullptr;
+  int64_t best_prio = INT64_MAX;
+  for (size_t level = 0; level < LEVELS; level++) {
+    // Entries whose mask covers the whole major opcode beat RVC-quadrant-only
+    // entries, which beat the rest, regardless of priority (e.g. c.sspush
+    // beats the reserved c.lui encoding it reuses).
+    if (best && (key_masks[level] & 0x7f) != 0x7f)
+      return best;
 
-  if (auto p = probe_once(insn, hash(insn.bits(), MASK2)))
-    return p;
-
-  return probe_once(insn, HASH_SIZE);
+    auto it = index[level].find(insn.bits() & key_masks[level]);
+    if (it == index[level].end())
+      continue;
+    for (const auto& e : it->second) {
+      if (e.prio >= best_prio)
+        break;
+      if (*e.insn == insn) {
+        best = e.insn;
+        best_prio = e.prio;
+        break;
+      }
+    }
+  }
+  return best;
 }
 
 void NOINLINE disassembler_t::add_insn(disasm_insn_t* insn)
 {
-  size_t idx =
-    (insn->get_mask() & MASK1) == MASK1 ? hash(insn->get_match(), MASK1) :
-    (insn->get_mask() & MASK2) == MASK2 ? hash(insn->get_match(), MASK2) :
-    HASH_SIZE;
+  size_t level = 0;
+  while ((insn->get_mask() & key_masks[level]) != key_masks[level])
+    level++; // terminates: the last key is 0
+  auto& list = index[level][insn->get_match() & key_masks[level]];
 
-  chain[idx].push_back(insn);
+  if (built) {
+    list.insert(list.begin(), {--top_prio, insn});
+    return;
+  }
+
+  // A built-in entry with the same encoding as an earlier one can never win.
+  for (const auto& e : list) {
+    if (e.insn->get_match() == insn->get_match() && e.insn->get_mask() == insn->get_mask()) {
+      delete insn;
+      return;
+    }
+  }
+  list.push_back({next_prio++, insn});
 }
 
 disassembler_t::~disassembler_t()
 {
-  for (size_t i = 0; i < HASH_SIZE+1; i++)
-    for (size_t j = 0; j < chain[i].size(); j++)
-      delete chain[i][j];
+  for (const auto& level : index)
+    for (const auto& [key, list] : level)
+      for (const auto& e : list)
+        delete e.insn;
 }
