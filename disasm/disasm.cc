@@ -1,14 +1,26 @@
 // See LICENSE for license details.
 
+// Table-driven disassembler.  Every instruction is one row
+//   {mnemonic, match, mask, operand format}
+// where the operand format is a comma-separated list of operand names from
+// operand_table() below (the operand format-string idea is borrowed from
+// QEMU's disas/riscv.c).  Rows are added in priority order: when encodings
+// overlap, the row added first wins, so pseudo-instructions go before the
+// instruction they alias.
+
 #include "disasm.h"
 #include "decode_macros.h"
 #include "platform.h"
 #include <cassert>
-#include <string>
-#include <vector>
-#include <cstdarg>
-#include <sstream>
+#include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
+#include <map>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 // For std::reverse:
 #include <algorithm>
 
@@ -21,631 +33,287 @@
 // then it will not be printed.
 static const arg_t* opt = nullptr;
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.i_imm()) + '(' + xpr_name[insn.rs1()] + ')';
-  }
-} load_address;
+namespace {
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_lbimm()) + '(' + xpr_name[insn.rvc_rs1s()] + ')';
-  }
-} rvb_b_address;
+struct operand_t : public arg_t {
+  std::string (*fn)(insn_t);
+  operand_t(std::string (*fn)(insn_t)) : fn(fn) {}
+  std::string to_string(insn_t insn) const override { return fn(insn); }
+};
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_lhimm()) + '(' + xpr_name[insn.rvc_rs1s()] + ')';
-  }
-} rvb_h_address;
+std::string hex(uint64_t v)
+{
+  std::stringstream s;
+  s << std::hex << "0x" << v;
+  return s.str();
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.s_imm()) + '(' + xpr_name[insn.rs1()] + ')';
-  }
-} store_address;
+std::string mem(int imm, uint64_t base)
+{
+  return std::to_string(imm) + '(' + xpr_name[base] + ')';
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::string("(") + xpr_name[insn.rs1()] + ')';
-  }
-} base_only_address;
+std::string pc_rel(int32_t target)
+{
+  return (target >= 0 ? "pc + " : "pc - ") + std::to_string(abs(target));
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::string("(") + xpr_name[insn.rs2()] + ')';
-  }
-} base_rs2_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rd()];
-  }
-} xrd;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rs1()];
-  }
-} xrs1;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((uint32_t)insn.rvc_index());
-  }
-} rvcm_jt_index;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    int rlist = insn.rvc_rlist();
-    if (rlist >= 4) {
-      switch(rlist) {
-        case 4: return "{ra}";
-        case 5: return "{ra, s0}";
-        case 15: return "{ra, s0-s11}";
-        default: return "{ra, s0-s" + std::to_string(rlist - 5)+'}';
-      }
-    } else {
-      return "unsupport rlist";
-    }
-  }
-} rvcm_pushpop_rlist;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return '-' + std::to_string(insn.zcmp_stack_adjustment(32));
-  }
-} rvcm_push_stack_adj_32;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return '-' + std::to_string(insn.zcmp_stack_adjustment(64));
-  }
-} rvcm_push_stack_adj_64;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string(insn.zcmp_stack_adjustment(32));
-  }
-} rvcm_pop_stack_adj_32;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string(insn.zcmp_stack_adjustment(64));
-  }
-} rvcm_pop_stack_adj_64;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rs2()];
-  }
-} xrs2;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rs3()];
-  }
-} xrs3;
-
-// RV32 P-extension register pair arguments (even register number)
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rd_p()];
-  }
-} xrd_p;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rs1_p()];
-  }
-} xrs1_p;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rs2_p()];
-  }
-} xrs2_p;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return frm_name(insn.rm());
-  }
-} rm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return fpr_name[insn.rd()];
-  }
-} frd;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return fpr_name[insn.rs1()];
-  }
-} frs1;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return fpr_name[insn.rs2()];
-  }
-} frs2;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return fpr_name[insn.rs3()];
-  }
-} frs3;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    switch (insn.csr())
+std::string csr_operand(insn_t insn)
+{
+  switch (insn.csr())
+  {
+    #define DECLARE_CSR(name, num) case num: return #name;
+    #include "encoding.h"
+    #undef DECLARE_CSR
+    default:
     {
-      #define DECLARE_CSR(name, num) case num: return #name;
-      #include "encoding.h"
-      #undef DECLARE_CSR
-      default:
-      {
-        char buf[16];
-        snprintf(buf, sizeof buf, "unknown_%03" PRIx64, insn.csr());
-        return std::string(buf);
-      }
+      char buf[16];
+      snprintf(buf, sizeof buf, "unknown_%03" PRIx64, insn.csr());
+      return std::string(buf);
     }
   }
-} csr;
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.i_imm());
+std::string jump_target(insn_t insn)
+{
+  std::stringstream s;
+  int32_t target = insn.uj_imm();
+  char sign = target >= 0 ? '+' : '-';
+  s << "pc " << sign << std::hex << " 0x" << abs(target);
+  return s.str();
+}
+
+std::string fli_imm(insn_t insn)
+{
+  static const char* table[32] = {
+    "-1.0", "min", "1.52587890625e-05", "3.0517578125e-05",
+    "0.00390625", "0.0078125", "0.0625", "0.125",
+    "0.25", "0.3125", "0.375", "0.4375",
+    "0.5", "0.625", "0.75", "0.875",
+    "1.0", "1.25", "1.5", "1.75",
+    "2.0", "2.5", "3.0", "4.0",
+    "8.0", "16.0", "128.0", "256.0",
+    "32768.0", "65536.0", "inf", "nan"
+  };
+  return table[insn.rs1()];
+}
+
+std::string iorw(insn_t insn)
+{
+  std::string s;
+  auto bits = insn.iorw();
+  bool has_pre = false;
+  static const char type[] = "wroi";
+  for (int i = 7; i >= 4; --i) {
+    if (bits & (1ul << i)) {
+      s += type[i - 4];
+      has_pre = true;
+    }
   }
-} imm;
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.shamt());
+  s += (has_pre ? "," : "");
+  for (int i = 3; i >= 0; --i) {
+    if (bits & (1ul << i)) {
+      s += type[i];
+    }
   }
-} shamt;
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    std::stringstream s;
-    s << std::hex << "0x" << ((uint32_t)insn.u_imm() >> 12);
-    return s.str();
-  }
-} bigimm;
+  return s;
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string(insn.rs1());
-  }
-} zimm5;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string(insn.v_zimm6());
-  }
-} v_zimm6;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    static const char* table[32] = {
-      "-1.0",
-      "min",
-      "1.52587890625e-05",
-      "3.0517578125e-05",
-      "0.00390625",
-      "0.0078125",
-      "0.0625",
-      "0.125",
-      "0.25",
-      "0.3125",
-      "0.375",
-      "0.4375",
-      "0.5",
-      "0.625",
-      "0.75",
-      "0.875",
-      "1.0",
-      "1.25",
-      "1.5",
-      "1.75",
-      "2.0",
-      "2.5",
-      "3.0",
-      "4.0",
-      "8.0",
-      "16.0",
-      "128.0",
-      "256.0",
-      "32768.0",
-      "65536.0",
-      "inf",
-      "nan"
-    };
-
-    return table[insn.rs1()];
-  }
-} fli_imm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    int32_t target = insn.sb_imm();
-    std::string s = target >= 0 ? "pc + " : "pc - ";
-    s += std::to_string(abs(target));
-    return s;
-  }
-} branch_target;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    std::stringstream s;
-    int32_t target = insn.uj_imm();
-    char sign = target >= 0 ? '+' : '-';
-    s << "pc " << sign << std::hex << " 0x" << abs(target);
-    return s.str();
-  }
-} jump_target;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rvc_rs1()];
-  }
-} rvc_rs1;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rvc_rs2()];
-  }
-} rvc_rs2;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return fpr_name[insn.rvc_rs2()];
-  }
-} rvc_fp_rs2;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rvc_rs1s()];
-  }
-} rvc_rs1s;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[insn.rvc_rs2s()];
-  }
-} rvc_rs2s;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[RVC_R1S];
-  }
-} rvc_r1s;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return xpr_name[RVC_R2S];
-  }
-} rvc_r2s;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return fpr_name[insn.rvc_rs2s()];
-  }
-} rvc_fp_rs2s;
-
-struct : public arg_t {
-  std::string to_string(insn_t UNUSED insn) const override {
-    return xpr_name[X_SP];
-  }
-} rvc_sp;
-
-struct : public arg_t {
-  std::string to_string(insn_t UNUSED insn) const override {
-    return xpr_name[X_RA];
-  }
-} rvc_ra;
-
-struct : public arg_t {
-  std::string to_string(insn_t UNUSED insn) const override {
-    return xpr_name[X_T0];
-  }
-} rvc_t0;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_imm());
-  }
-} rvc_imm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_addi4spn_imm());
-  }
-} rvc_addi4spn_imm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_addi16sp_imm());
-  }
-} rvc_addi16sp_imm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_lwsp_imm());
-  }
-} rvc_lwsp_imm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)(insn.rvc_imm() & 0x3f));
-  }
-} rvc_shamt;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    std::stringstream s;
-    s << std::hex << "0x" << ((uint32_t)insn.rvc_imm() << 12 >> 12);
-    return s.str();
-  }
-} rvc_uimm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_lwsp_imm()) + '(' + xpr_name[X_SP] + ')';
-  }
-} rvc_lwsp_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_ldsp_imm()) + '(' + xpr_name[X_SP] + ')';
-  }
-} rvc_ldsp_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_swsp_imm()) + '(' + xpr_name[X_SP] + ')';
-  }
-} rvc_swsp_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_sdsp_imm()) + '(' + xpr_name[X_SP] + ')';
-  }
-} rvc_sdsp_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_lw_imm()) + '(' + xpr_name[insn.rvc_rs1s()] + ')';
-  }
-} rvc_lw_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rvc_ld_imm()) + '(' + xpr_name[insn.rvc_rs1s()] + ')';
-  }
-} rvc_ld_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    int32_t target = insn.rvc_b_imm();
-    std::string s = target >= 0 ? "pc + " : "pc - ";
-    s += std::to_string(abs(target));
-    return s;
-  }
-} rvc_branch_target;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    int32_t target = insn.rvc_j_imm();
-    std::string s = target >= 0 ? "pc + " : "pc - ";
-    s += std::to_string(abs(target));
-    return s;
-  }
-} rvc_jump_target;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::string("(") + xpr_name[insn.rs1()] + ')';
-  }
-} v_address;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return vr_name[insn.rd()];
-  }
-} vd;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return vr_name[insn.rs1()];
-  }
-} vs1;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return vr_name[insn.rs2()];
-  }
-} vs2;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return vr_name[insn.rd()];
-  }
-} vs3;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return insn.v_vm() ? "" : "v0.t";
-  }
-} vm;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return vr_name[insn.rs2() & -8];
-  }
-} bdota_vs2;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    int ci = 8 * (insn.rs2() % 8);
-    return std::to_string(ci);
-  }
-} bdota_ci;
-
-struct : public arg_t {
-  std::string to_string(insn_t UNUSED insn) const override {
-    return "v0";
-  }
-} v0;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.v_simm5());
-  }
-} v_simm5;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    std::stringstream s;
-    int sew = insn.v_sew();
-    int lmul = insn.v_lmul();
-    auto vta = insn.v_vta() == 1 ? "ta" : "tu";
-    auto vma = insn.v_vma() == 1 ? "ma" : "mu";
-    int newType = (insn.bits() & 0x80000000) ? insn.v_zimm10() : insn.v_zimm11();
-    // if bit 31 is set, this is vsetivli and there is a 10-bit vtype, else this is vsetvli and there is an 11-bit vtype
-    // If the provided vtype has reserved bits, display the hex version of the vtype instead
-    if ((newType >> 8) != 0) {
-      s << "0x" << std::hex << newType;
+std::string v_vtype(insn_t insn)
+{
+  std::stringstream s;
+  int sew = insn.v_sew();
+  int lmul = insn.v_lmul();
+  auto vta = insn.v_vta() == 1 ? "ta" : "tu";
+  auto vma = insn.v_vma() == 1 ? "ma" : "mu";
+  // if bit 31 is set, this is vsetivli and there is a 10-bit vtype, else this is vsetvli and there is an 11-bit vtype
+  int newType = (insn.bits() & 0x80000000) ? insn.v_zimm10() : insn.v_zimm11();
+  // If the provided vtype has reserved bits, display the hex version of the vtype instead
+  if ((newType >> 8) != 0) {
+    s << "0x" << std::hex << newType;
+  } else {
+    s << "e" << sew;
+    if (insn.v_frac_lmul()) {
+      static const char* frac[] = {"", "f8", "f4", "f2"};
+      s << ", m" << frac[lmul];
     } else {
-      s << "e" << sew;
-      if(insn.v_frac_lmul()) {
-        std::string lmul_str = "";
-        switch(lmul){
-          case 3:
-            lmul_str = "f2";
-            break;
-          case 2:
-            lmul_str = "f4";
-            break;
-          case 1:
-            lmul_str = "f8";
-            break;
-          default:
-            assert(true && "unsupport fractional LMUL");
-        }
-        s << ", m" << lmul_str;
-      } else {
-        s << ", m" << (1 << lmul);
-      }
-      s << ", " << vta << ", " << vma;
+      s << ", m" << (1 << lmul);
     }
-
-    return s.str();
+    s << ", " << vta << ", " << vma;
   }
-} v_vtype;
 
-struct : public arg_t {
-  std::string to_string(insn_t UNUSED insn) const override {
-    return "x0";
+  return s.str();
+}
+
+std::string rvcm_pushpop_rlist(insn_t insn)
+{
+  int rlist = insn.rvc_rlist();
+  switch (rlist) {
+    case 0: case 1: case 2: case 3: return "unsupport rlist";
+    case 4: return "{ra}";
+    case 5: return "{ra, s0}";
+    case 15: return "{ra, s0-s11}";
+    default: return "{ra, s0-s" + std::to_string(rlist - 5) + '}';
   }
-} x0;
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    std::string s;
-    auto iorw = insn.iorw();
-    bool has_pre = false;
-    static const char type[] = "wroi";
-    for (int i = 7; i >= 4; --i) {
-      if (iorw & (1ul << i)) {
-        s += type[i - 4];
-        has_pre = true;
-      }
+#define OPERAND(name, expr) \
+  {name, operand_t([](UNUSED insn_t insn) -> std::string { return expr; })}
+
+// std::less<> allows lookup by string_view without building a std::string
+typedef std::map<std::string, operand_t, std::less<>> operand_table_t;
+
+const operand_table_t& operand_table()
+{
+  static const operand_table_t table = {
+    // integer registers; rdp/rs1p/rs2p are RV32 P-extension register pairs
+    OPERAND("rd", xpr_name[insn.rd()]),
+    OPERAND("rs1", xpr_name[insn.rs1()]),
+    OPERAND("rs2", xpr_name[insn.rs2()]),
+    OPERAND("rs3", xpr_name[insn.rs3()]),
+    OPERAND("rdp", xpr_name[insn.rd_p()]),
+    OPERAND("rs1p", xpr_name[insn.rs1_p()]),
+    OPERAND("rs2p", xpr_name[insn.rs2_p()]),
+
+    // memory operands
+    OPERAND("imm(rs1)", mem(insn.i_imm(), insn.rs1())),
+    OPERAND("simm(rs1)", mem(insn.s_imm(), insn.rs1())),
+    OPERAND("(rs1)", std::string("(") + xpr_name[insn.rs1()] + ')'),
+    OPERAND("(rs2)", std::string("(") + xpr_name[insn.rs2()] + ')'),
+
+    // floating-point
+    OPERAND("frd", fpr_name[insn.rd()]),
+    OPERAND("frs1", fpr_name[insn.rs1()]),
+    OPERAND("frs2", fpr_name[insn.rs2()]),
+    OPERAND("frs3", fpr_name[insn.rs3()]),
+    OPERAND("rm", frm_name(insn.rm())),
+    OPERAND("fli_imm", fli_imm(insn)),
+
+    // immediates and other fields
+    OPERAND("csr", csr_operand(insn)),
+    OPERAND("imm", std::to_string((int)insn.i_imm())),
+    OPERAND("shamt", std::to_string((int)insn.shamt())),
+    OPERAND("bigimm", hex((uint32_t)insn.u_imm() >> 12)),
+    OPERAND("zimm5", std::to_string(insn.rs1())),
+    OPERAND("branch_target", pc_rel(insn.sb_imm())),
+    OPERAND("jump_target", jump_target(insn)),
+    OPERAND("iorw", iorw(insn)),
+    OPERAND("b_imm5", std::to_string((int)insn.b_imm5())),
+    OPERAND("bs", std::to_string((int)insn.bs())),
+    OPERAND("rcon", std::to_string((int)insn.rcon())),
+    OPERAND("p_imm8", std::to_string((int)insn.p_imm8())),
+    OPERAND("p_imm10csl", std::to_string((int)insn.p_imm10csl())),
+    OPERAND("p_imm10csr", std::to_string((int)insn.p_imm10csr())),
+    OPERAND("shamtb", std::to_string((int)insn.shamtb())),
+    OPERAND("shamth", std::to_string((int)insn.shamth())),
+    OPERAND("shamtw", std::to_string((int)insn.shamtw())),
+    OPERAND("shamtd", std::to_string((int)insn.shamtd())),
+
+    // compressed
+    OPERAND("rvc_rs1", xpr_name[insn.rvc_rs1()]),
+    OPERAND("rvc_rs2", xpr_name[insn.rvc_rs2()]),
+    OPERAND("rvc_rs1s", xpr_name[insn.rvc_rs1s()]),
+    OPERAND("rvc_rs2s", xpr_name[insn.rvc_rs2s()]),
+    OPERAND("rvc_fp_rs2", fpr_name[insn.rvc_rs2()]),
+    OPERAND("rvc_fp_rs2s", fpr_name[insn.rvc_rs2s()]),
+    OPERAND("rvc_r1s", xpr_name[RVC_R1S]),
+    OPERAND("rvc_r2s", xpr_name[RVC_R2S]),
+    OPERAND("rvc_sp", xpr_name[X_SP]),
+    OPERAND("rvc_ra", xpr_name[X_RA]),
+    OPERAND("rvc_t0", xpr_name[X_T0]),
+    OPERAND("rvc_imm", std::to_string((int)insn.rvc_imm())),
+    OPERAND("rvc_addi4spn_imm", std::to_string((int)insn.rvc_addi4spn_imm())),
+    OPERAND("rvc_addi16sp_imm", std::to_string((int)insn.rvc_addi16sp_imm())),
+    OPERAND("rvc_shamt", std::to_string((int)(insn.rvc_imm() & 0x3f))),
+    OPERAND("rvc_uimm", hex((uint32_t)insn.rvc_imm() << 12 >> 12)),
+    OPERAND("rvc_lwsp_address", mem(insn.rvc_lwsp_imm(), X_SP)),
+    OPERAND("rvc_ldsp_address", mem(insn.rvc_ldsp_imm(), X_SP)),
+    OPERAND("rvc_swsp_address", mem(insn.rvc_swsp_imm(), X_SP)),
+    OPERAND("rvc_sdsp_address", mem(insn.rvc_sdsp_imm(), X_SP)),
+    OPERAND("rvc_lw_address", mem(insn.rvc_lw_imm(), insn.rvc_rs1s())),
+    OPERAND("rvc_ld_address", mem(insn.rvc_ld_imm(), insn.rvc_rs1s())),
+    OPERAND("rvb_b_address", mem(insn.rvc_lbimm(), insn.rvc_rs1s())),
+    OPERAND("rvb_h_address", mem(insn.rvc_lhimm(), insn.rvc_rs1s())),
+    OPERAND("rvc_branch_target", pc_rel(insn.rvc_b_imm())),
+    OPERAND("rvc_jump_target", pc_rel(insn.rvc_j_imm())),
+    OPERAND("rvcm_jt_index", std::to_string((uint32_t)insn.rvc_index())),
+    OPERAND("rvcm_pushpop_rlist", rvcm_pushpop_rlist(insn)),
+    OPERAND("rvcm_push_stack_adj_32", '-' + std::to_string(insn.zcmp_stack_adjustment(32))),
+    OPERAND("rvcm_push_stack_adj_64", '-' + std::to_string(insn.zcmp_stack_adjustment(64))),
+    OPERAND("rvcm_pop_stack_adj_32", std::to_string(insn.zcmp_stack_adjustment(32))),
+    OPERAND("rvcm_pop_stack_adj_64", std::to_string(insn.zcmp_stack_adjustment(64))),
+
+    // vector; "vm" is the optional ", v0.t" mask suffix
+    OPERAND("vd", vr_name[insn.rd()]),
+    OPERAND("vs1", vr_name[insn.rs1()]),
+    OPERAND("vs2", vr_name[insn.rs2()]),
+    OPERAND("vs3", vr_name[insn.rd()]),
+    OPERAND("vm", insn.v_vm() ? "" : "v0.t"),
+    OPERAND("v0", "v0"),
+    OPERAND("v_simm5", std::to_string((int)insn.v_simm5())),
+    OPERAND("v_zimm6", std::to_string(insn.v_zimm6())),
+    OPERAND("v_vtype", v_vtype(insn)),
+    OPERAND("bdota_vs2", vr_name[insn.rs2() & -8]),
+    OPERAND("bdota_ci", std::to_string(8 * (insn.rs2() % 8))),
+  };
+  return table;
+}
+
+#undef OPERAND
+
+std::vector<const arg_t*> parse_format(const char* fmt)
+{
+  std::vector<const arg_t*> args;
+  for (std::string_view rest = fmt; !rest.empty();) {
+    auto comma = rest.find(',');
+    auto name = rest.substr(0, comma);
+    rest = comma == rest.npos ? std::string_view() : rest.substr(comma + 1);
+
+    auto it = operand_table().find(name);
+    if (it == operand_table().end()) {
+      fprintf(stderr, "disasm: unknown operand '%.*s' in format \"%s\"\n", (int)name.size(), name.data(), fmt);
+      abort();
     }
-
-    s += (has_pre ? "," : "");
-    for (int i = 3; i >= 0; --i) {
-      if (iorw & (1ul << i)) {
-        s += type[i];
-      }
-    }
-
-    return s;
+    if (name == "vm")
+      args.push_back(opt);
+    args.push_back(&it->second);
   }
-} iorw;
+  return args;
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.p_imm8());
-  }
-} p_imm8;
+struct insn_row_t {
+  const char* name;
+  uint32_t match;
+  uint32_t mask;
+  const char* fmt;
+};
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.p_imm10csl());
-  }
-} p_imm10csl;
+void add_row(disassembler_t* d, const insn_row_t& r)
+{
+  // Rows only use string-literal formats, so the pointer identifies the
+  // format; thread_local keeps concurrent disassembler construction safe.
+  static thread_local std::unordered_map<const char*, std::vector<const arg_t*>> cache;
+  auto it = cache.find(r.fmt);
+  if (it == cache.end())
+    it = cache.emplace(r.fmt, parse_format(r.fmt)).first;
+  d->add_insn(new disasm_insn_t(r.name, r.match, r.mask, it->second));
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.p_imm10csr());
-  }
-} p_imm10csr;
+void add_unknown_insns(disassembler_t* d)
+{
+  // provide a default disassembly for all instructions as a fallback
+  static const insn_row_t rows[] = {
+    #define DECLARE_INSN(code, match, mask) {#code " (args unknown)", match, mask, ""},
+    #include "encoding.h"
+    #undef DECLARE_INSN
+  };
+  for (const auto& r : rows)
+    add_row(d, r);
+}
 
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.p_imm10csrw());
-  }
-} p_imm10csrw;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.shamtd());
-  }
-} shamtd;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.shamtw());
-  }
-} shamtw;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.shamth());
-  }
-} shamth;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.shamtb());
-  }
-} shamtb;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.b_imm5());
-  }
-} b_imm5;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.bs());
-  }
-} bs;
-
-struct : public arg_t {
-  std::string to_string(insn_t insn) const override {
-    return std::to_string((int)insn.rcon());
-  }
-} rcon;
-
-typedef struct {
-  reg_t match;
-  reg_t mask;
-  const char *fmt;
-  std::vector<const arg_t*>& arg;
-} custom_fmt_t;
+} // namespace
 
 std::string disassembler_t::disassemble(insn_t insn) const
 {
@@ -653,278 +321,18 @@ std::string disassembler_t::disassemble(insn_t insn) const
   return disasm_insn ? disasm_insn->to_string(insn) : "unknown";
 }
 
-static void NOINLINE add_noarg_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {}));
-}
-
-static void NOINLINE add_rtype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1, &xrs2}));
-}
-
-static void NOINLINE add_r1type_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1}));
-}
-
-static void NOINLINE add_r3type_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1, &xrs2, &xrs3}));
-}
-
-// RV32 P-extension register pair instruction types
-// Type 1: rdp only (widening: result is pair, sources are normal regs)
-static void NOINLINE add_rtype_rdp_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd_p, &xrs1, &xrs2}));
-}
-
-// Type 1 variant: rdp + rs1 only (for unary widening ops)
-static void NOINLINE add_r1type_rdp_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd_p, &xrs1}));
-}
-
-// Type 1 variant: rdp + rs1 + imm (for widening immediate ops)
-// Type 2: rs1p only (narrowing: source is pair, result is normal reg)
-static void NOINLINE add_rtype_rs1p_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1_p, &xrs2}));
-}
-
-// Type 3: rdp + rs1p (both pairs, with scalar rs2)
-static void NOINLINE add_rtype_rdp_rs1p_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd_p, &xrs1_p, &xrs2}));
-}
-
-// Type 3 variant: rdp + rs1p only (for unary doubleword ops)
-static void NOINLINE add_r1type_rdp_rs1p_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd_p, &xrs1_p}));
-}
-
-// Type 4: rdp + rs1p + rs2p (all three are register pairs)
-static void NOINLINE add_rtype_pair_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd_p, &xrs1_p, &xrs2_p}));
-}
-
-static void NOINLINE add_itype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1, &imm}));
-}
-
-static void NOINLINE add_itype_shift_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &xrs1, &shamt}));
-}
-
-static void NOINLINE add_xload_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &load_address}));
-}
-
-static void NOINLINE add_xstore_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrs2, &store_address}));
-}
-
-static void NOINLINE add_fload_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frd, &load_address}));
-}
-
-static void NOINLINE add_fstore_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frs2, &store_address}));
-}
-
-static void NOINLINE add_xamo_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  const char *suffix[] = {"", ".rl", ".aq", ".aqrl"};
-  char new_name[128];
-  uint32_t new_mask = mask | (0x3 << 25);
-  uint32_t new_match;
-
-  for (uint32_t idx = 0; idx < sizeof(suffix) / sizeof(suffix[0]); ++idx) {
-    snprintf(new_name, sizeof(new_name), "%s%s", name, suffix[idx]);
-    new_match = match | (idx << 25);
-
-    d->add_insn(new disasm_insn_t(new_name, new_match, new_mask, {&xrd, &xrs2, &base_only_address}));
-  }
-}
-
-static void NOINLINE add_xlr_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &base_only_address}));
-}
-
-static void NOINLINE add_zilx_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  // Zilx assembly syntax: mnemonic rd, (rs2), rs1  (rs2 is base, rs1 is index)
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &base_rs2_address, &xrs1}));
-}
-
-static void NOINLINE add_xst_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrs2, &base_only_address}));
-}
-
-static void NOINLINE add_btype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrs1, &xrs2, &branch_target}));
-}
-
-static void NOINLINE add_bimmtype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrs1, &b_imm5, &branch_target}));
-}
-
-static void NOINLINE add_b1type_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  const uint32_t mask_rs2 = 0x1fUL << 20;
-  d->add_insn(new disasm_insn_t(name, match, mask | mask_rs2, {&xrs1, &branch_target}));
-}
-
-static void NOINLINE add_frtype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frd, &frs1, &frs2}));
-}
-
-static void NOINLINE add_fr1type_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frd, &frs1}));
-}
-
-static void NOINLINE add_fr3type_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frd, &frs1, &frs2, &frs3}));
-}
-
-static void NOINLINE add_fxtype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &frs1}));
-}
-
-static void NOINLINE add_xftype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frd, &xrs1}));
-}
-
-static void NOINLINE add_xf2type_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frd, &xrs1, &xrs2}));
-}
-
-static void NOINLINE add_fx2type_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &frs1, &frs2}));
-}
-
-static void NOINLINE add_fxrtype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrd, &frs1, &rm}));
-}
-
-static void NOINLINE add_flitype_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&frd, &fli_imm}));
-}
-
-static void NOINLINE add_sfence_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&xrs1, &xrs2}));
-}
-
-static void NOINLINE add_vector_v_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, opt, &vm}));
-}
-
-static void NOINLINE add_vector_vv_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &vs1, opt, &vm}));
-}
-
-static void NOINLINE add_vector_bdota_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &bdota_vs2, &vs1, &bdota_ci, opt, &vm}));
-}
-
-static void NOINLINE add_vector_multiplyadd_vv_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs1, &vs2, opt, &vm}));
-}
-
-static void NOINLINE add_vector_vx_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &xrs1, opt, &vm}));
-}
-
-static void NOINLINE add_vector_multiplyadd_vx_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &xrs1, &vs2, opt, &vm}));
-}
-
-static void NOINLINE add_vector_vf_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &frs1, opt, &vm}));
-}
-
-static void NOINLINE add_vector_multiplyadd_vf_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &frs1, &vs2, opt, &vm}));
-}
-
-static void NOINLINE add_vector_vi_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &v_simm5, opt, &vm}));
-}
-
-static void NOINLINE add_vector_viu_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &zimm5, opt, &vm}));
-}
-
-static void NOINLINE add_vector_viu_z6_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &v_zimm6, opt, &vm}));
-}
-
-static void NOINLINE add_vector_vvm_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &vs1, &v0}));
-}
-
-static void NOINLINE add_vector_vxm_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &xrs1, &v0}));
-}
-
-static void NOINLINE add_vector_vim_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  d->add_insn(new disasm_insn_t(name, match, mask, {&vd, &vs2, &v_simm5, &v0}));
-}
-
-static void NOINLINE add_unknown_insn(disassembler_t* d, const char* name, uint32_t match, uint32_t mask)
-{
-  std::string s = name;
-  s += " (args unknown)";
-
-  d->add_insn(new disasm_insn_t(s.c_str(), match, mask, {}));
-}
-
-
-static void NOINLINE add_unknown_insns(disassembler_t* d)
-{
-  // provide a default disassembly for all instructions as a fallback
-  #define DECLARE_INSN(code, match, mask) \
-   add_unknown_insn(d, #code, match, mask);
-  #include "encoding.h"
-  #undef DECLARE_INSN
-}
+// Row named after its encoding.h instruction ('_' is printed as '.').
+#define INSN(code, fmt) {#code, match_##code, mask_##code, fmt}
+// Same, with extra mask bits (reserved fields, fixed operands, ...).
+#define INSN_X(code, extra, fmt) {#code, match_##code, mask_##code | (extra), fmt}
+// Another mnemonic for (a subset of) an encoding, e.g. a pseudo-instruction.
+#define ALIAS(name, code, extra, fmt) {name, match_##code, mask_##code | (extra), fmt}
+// An AMO and its .rl/.aq/.aqrl variants.
+#define AMO(code) \
+  {#code,         match_##code,             mask_##code | mask_aqrl, "rd,rs2,(rs1)"}, \
+  {#code ".rl",   match_##code | (1 << 25), mask_##code | mask_aqrl, "rd,rs2,(rs1)"}, \
+  {#code ".aq",   match_##code | (2 << 25), mask_##code | mask_aqrl, "rd,rs2,(rs1)"}, \
+  {#code ".aqrl", match_##code | (3 << 25), mask_##code | mask_aqrl, "rd,rs2,(rs1)"}
 
 #define ext_enabled_strict(x) (isa->extension_enabled(x))
 #define ext_enabled(x) (ext_enabled_strict(x) || !strict)
@@ -943,13 +351,13 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
   const uint32_t mask_rvc_rs2 = 0x1fUL << 2;
   const uint32_t mask_rvc_imm = mask_rvc_rs2 | 0x1000UL;
   const uint32_t mask_nf = 0x7Ul << 29;
-  const uint32_t mask_wd = 0x1Ul << 26;
   const uint32_t mask_vm = 0x1Ul << 25;
+  const uint32_t mask_aqrl = 0x3Ul << 25;
   const uint32_t mask_vldst = 0x7Ul << 12 | 0x1UL << 28;
-  const uint32_t mask_amoop = 0x1fUl << 27;
-  const uint32_t mask_width = 0x7Ul << 12;
+  // Shift amounts are XLEN wide; on RV32 (and for the *w shifts) the MSB is reserved.
   const uint32_t mask_shamt_msb = 0x1Ul << 25;
-  const uint32_t mask_rvc_shamt_msb = 0x1Ul << 12;
+  const uint32_t shamt_msb = xlen_eq(64) ? 0 : mask_shamt_msb;
+  const uint32_t rvc_shamt_msb = xlen_eq(64) ? 0 : 0x1Ul << 12;
 
   #define DECLARE_INSN(code, match, mask) \
    const uint32_t match_##code = match; \
@@ -957,2238 +365,2261 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
   #include "encoding.h"
   #undef DECLARE_INSN
 
-  // explicit per-instruction disassembly
-  #define DISASM_INSN(name, code, extra, ...) \
-    add_insn(new disasm_insn_t(name, match_##code, mask_##code | (extra), __VA_ARGS__));
-  #define DEFINE_NOARG(code) add_noarg_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_RTYPE(code) add_rtype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_R1TYPE(code) add_r1type_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_R3TYPE(code) add_r3type_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ITYPE(code) add_itype_insn(this, #code, match_##code, mask_##code);
-  // A shift-immediate instruction with a 5-bit shift amount, where instruction
-  // bit 25 is reserved. This is the *w instructions, which always shift a
-  // 32-bit value, and on RV32 every shift-immediate instruction.
-  #define DEFINE_ITYPE_SHIFTW(code) add_itype_shift_insn(this, #code, match_##code, mask_##code | mask_shamt_msb);
-  // A shift-immediate instruction whose shift amount is XLEN wide.
-  #define DEFINE_ITYPE_SHIFT(code) if (xlen_eq(64)) { add_itype_shift_insn(this, #code, match_##code, mask_##code); } else { DEFINE_ITYPE_SHIFTW(code) }
-  // RV32 P-extension register pair macros
-  #define DEFINE_RTYPE_RDP(code) add_rtype_rdp_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_R1TYPE_RDP(code) add_r1type_rdp_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ITYPE_RDP(code) add_itype_rdp_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ITYPE_SHIFT_RDP(code) add_itype_shift_rdp_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_RTYPE_RS1P(code) add_rtype_rs1p_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ITYPE_RS1P(code) add_itype_rs1p_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ITYPE_SHIFT_RS1P(code) add_itype_shift_rs1p_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_RTYPE_RDP_RS1P(code) add_rtype_rdp_rs1p_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_R1TYPE_RDP_RS1P(code) add_r1type_rdp_rs1p_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ITYPE_RDP_RS1P(code) add_itype_rdp_rs1p_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ITYPE_SHIFT_RDP_RS1P(code) add_itype_shift_rdp_rs1p_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_RTYPE_PAIR(code) add_rtype_pair_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_I0TYPE(name, code) DISASM_INSN(name, code, mask_rs1, {&xrd, &imm})
-  #define DEFINE_I1TYPE(name, code) DISASM_INSN(name, code, mask_imm, {&xrd, &xrs1})
-  #define DEFINE_I2TYPE(name, code) DISASM_INSN(name, code, mask_rd | mask_imm, {&xrs1})
-  #define DEFINE_PREFETCH(code) DISASM_INSN(#code, code, 0, {&store_address})
-  #define DEFINE_LTYPE(code) DISASM_INSN(#code, code, 0, {&xrd, &bigimm})
-  #define DEFINE_BTYPE(code) add_btype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_BIMMTYPE(code) add_bimmtype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_B1TYPE(name, code) add_b1type_insn(this, name, match_##code, mask_##code);
-  #define DEFINE_XLOAD(code) add_xload_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_XSTORE(code) add_xstore_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_XAMO(code) add_xamo_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_XLOAD_BASE(code) add_xlr_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_XSTORE_BASE(code) add_xst_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_ZILX(code) add_zilx_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FLOAD(code) add_fload_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FSTORE(code) add_fstore_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FRTYPE(code) add_frtype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FR1TYPE(code) add_fr1type_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FR3TYPE(code) add_fr3type_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FXTYPE(code) add_fxtype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FX2TYPE(code) add_fx2type_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FXRTYPE(code) add_fxrtype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_FLITYPE(code) add_flitype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_XFTYPE(code) add_xftype_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_XF2TYPE(code) add_xf2type_insn(this, #code, match_##code, mask_##code);
-  #define DEFINE_SFENCE_TYPE(code) add_sfence_insn(this, #code, match_##code, mask_##code);
+  auto add = [this](std::initializer_list<insn_row_t> rows) {
+    for (const auto& r : rows)
+      add_row(this, r);
+  };
 
-  add_insn(new disasm_insn_t("unimp", match_csrrw|(CSR_CYCLE<<20), 0xffffffff, {}));
-  add_insn(new disasm_insn_t("c.unimp", 0, 0xffff, {}));
+  // Vector operand formats shared by most vector arithmetic instructions;
+  // the m* forms are the multiply-add operand order.
+  const char* const v = "vd,vs2,vm";
+  const char* const vv = "vd,vs2,vs1,vm";
+  const char* const vx = "vd,vs2,rs1,vm";
+  const char* const vf = "vd,vs2,frs1,vm";
+  const char* const vi = "vd,vs2,v_simm5,vm";
+  const char* const viu = "vd,vs2,zimm5,vm";
+  const char* const mvv = "vd,vs1,vs2,vm";
+  const char* const mvx = "vd,rs1,vs2,vm";
+  const char* const mvf = "vd,frs1,vs2,vm";
 
-  // Following are HINTs, so they must precede their corresponding base-ISA
-  // instructions.  We do not condition them on Zicbop/Zihintpause because,
-  // definitionally, all implementations provide them.
-  DEFINE_PREFETCH(prefetch_r);
-  DEFINE_PREFETCH(prefetch_w);
-  DEFINE_PREFETCH(prefetch_i);
-  DEFINE_NOARG(pause);
+  add({
+    {"unimp", match_csrrw|(CSR_CYCLE<<20), 0xffffffff, ""},
+    {"c.unimp", 0, 0xffff, ""},
 
-  DEFINE_XLOAD(lb)
-  DEFINE_XLOAD(lbu)
-  DEFINE_XLOAD(lh)
-  DEFINE_XLOAD(lhu)
-  DEFINE_XLOAD(lw)
+    // Following are HINTs, so they must precede their corresponding base-ISA
+    // instructions.  We do not condition them on Zicbop/Zihintpause because,
+    // definitionally, all implementations provide them.
+    INSN(prefetch_r, "simm(rs1)"),
+    INSN(prefetch_w, "simm(rs1)"),
+    INSN(prefetch_i, "simm(rs1)"),
+    INSN(pause, ""),
 
-  DEFINE_XSTORE(sb)
-  DEFINE_XSTORE(sh)
-  DEFINE_XSTORE(sw)
+    INSN(lb, "rd,imm(rs1)"),
+    INSN(lbu, "rd,imm(rs1)"),
+    INSN(lh, "rd,imm(rs1)"),
+    INSN(lhu, "rd,imm(rs1)"),
+    INSN(lw, "rd,imm(rs1)"),
 
-  if (xlen_eq(64)) {
-    DEFINE_XLOAD(lwu)
-    DEFINE_XLOAD(ld)
+    INSN(sb, "rs2,simm(rs1)"),
+    INSN(sh, "rs2,simm(rs1)"),
+    INSN(sw, "rs2,simm(rs1)"),
+  });
 
-    DEFINE_XSTORE(sd)
-  }
+  if (xlen_eq(64)) add({
+    INSN(lwu, "rd,imm(rs1)"),
+    INSN(ld, "rd,imm(rs1)"),
+
+    INSN(sd, "rs2,simm(rs1)"),
+  });
 
   if (ext_enabled(EXT_ZAAMO)) {
-    DEFINE_XAMO(amoadd_w)
-    DEFINE_XAMO(amoswap_w)
-    DEFINE_XAMO(amoand_w)
-    DEFINE_XAMO(amoor_w)
-    DEFINE_XAMO(amoxor_w)
-    DEFINE_XAMO(amomin_w)
-    DEFINE_XAMO(amomax_w)
-    DEFINE_XAMO(amominu_w)
-    DEFINE_XAMO(amomaxu_w)
+    add({
+      AMO(amoadd_w),
+      AMO(amoswap_w),
+      AMO(amoand_w),
+      AMO(amoor_w),
+      AMO(amoxor_w),
+      AMO(amomin_w),
+      AMO(amomax_w),
+      AMO(amominu_w),
+      AMO(amomaxu_w),
+    });
 
-    if (xlen_eq(64)) {
-      DEFINE_XAMO(amoadd_d)
-      DEFINE_XAMO(amoswap_d)
-      DEFINE_XAMO(amoand_d)
-      DEFINE_XAMO(amoor_d)
-      DEFINE_XAMO(amoxor_d)
-      DEFINE_XAMO(amomin_d)
-      DEFINE_XAMO(amomax_d)
-      DEFINE_XAMO(amominu_d)
-      DEFINE_XAMO(amomaxu_d)
-    }
+    if (xlen_eq(64)) add({
+      AMO(amoadd_d),
+      AMO(amoswap_d),
+      AMO(amoand_d),
+      AMO(amoor_d),
+      AMO(amoxor_d),
+      AMO(amomin_d),
+      AMO(amomax_d),
+      AMO(amominu_d),
+      AMO(amomaxu_d),
+    });
   }
 
   if (ext_enabled(EXT_ZALRSC)) {
-    DEFINE_XLOAD_BASE(lr_w)
-    DEFINE_XAMO(sc_w)
+    add({
+      INSN(lr_w, "rd,(rs1)"),
+      AMO(sc_w),
+    });
 
-    if (xlen_eq(64)) {
-      DEFINE_XLOAD_BASE(lr_d)
-      DEFINE_XAMO(sc_d)
-    }
+    if (xlen_eq(64)) add({
+      INSN(lr_d, "rd,(rs1)"),
+      AMO(sc_d),
+    });
   }
 
   if (ext_enabled(EXT_ZACAS)) {
-    DEFINE_XAMO(amocas_w)
-    DEFINE_XAMO(amocas_d)
+    add({
+      AMO(amocas_w),
+      AMO(amocas_d),
+    });
 
-    if (xlen_eq(64))
-      DEFINE_XAMO(amocas_q)
+    if (xlen_eq(64)) add({
+      AMO(amocas_q),
+    });
   }
 
-  if (ext_enabled(EXT_ZABHA)) {
-    DEFINE_XAMO(amoadd_b)
-    DEFINE_XAMO(amoswap_b)
-    DEFINE_XAMO(amoand_b)
-    DEFINE_XAMO(amoor_b)
-    DEFINE_XAMO(amoxor_b)
-    DEFINE_XAMO(amomin_b)
-    DEFINE_XAMO(amomax_b)
-    DEFINE_XAMO(amominu_b)
-    DEFINE_XAMO(amomaxu_b)
-    DEFINE_XAMO(amocas_b)
-    DEFINE_XAMO(amoadd_h)
-    DEFINE_XAMO(amoswap_h)
-    DEFINE_XAMO(amoand_h)
-    DEFINE_XAMO(amoor_h)
-    DEFINE_XAMO(amoxor_h)
-    DEFINE_XAMO(amomin_h)
-    DEFINE_XAMO(amomax_h)
-    DEFINE_XAMO(amominu_h)
-    DEFINE_XAMO(amomaxu_h)
-    DEFINE_XAMO(amocas_h)
-  }
+  if (ext_enabled(EXT_ZABHA)) add({
+    AMO(amoadd_b),
+    AMO(amoswap_b),
+    AMO(amoand_b),
+    AMO(amoor_b),
+    AMO(amoxor_b),
+    AMO(amomin_b),
+    AMO(amomax_b),
+    AMO(amominu_b),
+    AMO(amomaxu_b),
+    AMO(amocas_b),
+    AMO(amoadd_h),
+    AMO(amoswap_h),
+    AMO(amoand_h),
+    AMO(amoor_h),
+    AMO(amoxor_h),
+    AMO(amomin_h),
+    AMO(amomax_h),
+    AMO(amominu_h),
+    AMO(amomaxu_h),
+    AMO(amocas_h),
+  });
 
-  if (ext_enabled(EXT_ZAWRS)) {
-    DEFINE_NOARG(wrs_sto);
-    DEFINE_NOARG(wrs_nto);
-  }
+  if (ext_enabled(EXT_ZAWRS)) add({
+    INSN(wrs_sto, ""),
+    INSN(wrs_nto, ""),
+  });
 
   if (ext_enabled(EXT_ZILX)) {
     // `lxb`/`lxbu` are assembler pseudoinstructions for `lxsb`/`lxsbu`; add
     // them first so they win when disassembling the shared encoding.
-    add_zilx_insn(this, "lxb", match_lxsb, mask_lxsb);
-    add_zilx_insn(this, "lxbu", match_lxsbu, mask_lxsbu);
+    add({
+      ALIAS("lxb", lxsb, 0, "rd,(rs2),rs1"),
+      ALIAS("lxbu", lxsbu, 0, "rd,(rs2),rs1"),
 
-    // unscaled indexed loads
-    DEFINE_ZILX(lxh)
-    DEFINE_ZILX(lxw)
-    DEFINE_ZILX(lxhu)
+      // unscaled indexed loads
+      INSN(lxh, "rd,(rs2),rs1"),
+      INSN(lxw, "rd,(rs2),rs1"),
+      INSN(lxhu, "rd,(rs2),rs1"),
 
-    // scaled indexed loads
-    DEFINE_ZILX(lxsb)
-    DEFINE_ZILX(lxsh)
-    DEFINE_ZILX(lxsw)
-    DEFINE_ZILX(lxsbu)
-    DEFINE_ZILX(lxshu)
+      // scaled indexed loads
+      INSN(lxsb, "rd,(rs2),rs1"),
+      INSN(lxsh, "rd,(rs2),rs1"),
+      INSN(lxsw, "rd,(rs2),rs1"),
+      INSN(lxsbu, "rd,(rs2),rs1"),
+      INSN(lxshu, "rd,(rs2),rs1"),
+    });
 
-    if (xlen_eq(64)) {
+    if (xlen_eq(64)) add({
       // unscaled indexed loads (RV64-only widths)
-      DEFINE_ZILX(lxd)
-      DEFINE_ZILX(lxwu)
+      INSN(lxd, "rd,(rs2),rs1"),
+      INSN(lxwu, "rd,(rs2),rs1"),
 
       // scaled indexed loads (RV64-only widths)
-      DEFINE_ZILX(lxsd)
-      DEFINE_ZILX(lxswu)
+      INSN(lxsd, "rd,(rs2),rs1"),
+      INSN(lxswu, "rd,(rs2),rs1"),
 
       // scaled indexed loads with zero-extended 32-bit index (RV64-only)
-      DEFINE_ZILX(lxsuwb)
-      DEFINE_ZILX(lxsuwh)
-      DEFINE_ZILX(lxsuww)
-      DEFINE_ZILX(lxsuwd)
-      DEFINE_ZILX(lxsuwbu)
-      DEFINE_ZILX(lxsuwhu)
-      DEFINE_ZILX(lxsuwwu)
-    }
+      INSN(lxsuwb, "rd,(rs2),rs1"),
+      INSN(lxsuwh, "rd,(rs2),rs1"),
+      INSN(lxsuww, "rd,(rs2),rs1"),
+      INSN(lxsuwd, "rd,(rs2),rs1"),
+      INSN(lxsuwbu, "rd,(rs2),rs1"),
+      INSN(lxsuwhu, "rd,(rs2),rs1"),
+      INSN(lxsuwwu, "rd,(rs2),rs1"),
+    });
   }
 
-  if (ext_enabled(EXT_ZICFILP)) {
+  if (ext_enabled(EXT_ZICFILP)) add({
     // lpad encodes as `auipc x0, label`, so it needs to be added before auipc
     // for higher disassembling priority
-    DISASM_INSN("lpad", lpad, 0, {&bigimm});
-  }
+    INSN(lpad, "bigimm"),
+  });
 
-  add_insn(new disasm_insn_t("j", match_jal, mask_jal | mask_rd, {&jump_target}));
-  add_insn(new disasm_insn_t("jal", match_jal | match_rd_ra, mask_jal | mask_rd, {&jump_target}));
-  add_insn(new disasm_insn_t("jal", match_jal, mask_jal, {&xrd, &jump_target}));
+  add({
+    {"j", match_jal, mask_jal | mask_rd, "jump_target"},
+    {"jal", match_jal | match_rd_ra, mask_jal | mask_rd, "jump_target"},
+    {"jal", match_jal, mask_jal, "rd,jump_target"},
 
-  DEFINE_B1TYPE("beqz", beq);
-  DEFINE_B1TYPE("bnez", bne);
-  DEFINE_B1TYPE("bltz", blt);
-  DEFINE_B1TYPE("bgez", bge);
-  DEFINE_BTYPE(beq)
-  DEFINE_BTYPE(bne)
-  DEFINE_BTYPE(blt)
-  DEFINE_BTYPE(bge)
-  DEFINE_BTYPE(bltu)
-  DEFINE_BTYPE(bgeu)
+    ALIAS("beqz", beq, mask_rs2, "rs1,branch_target"),
+    ALIAS("bnez", bne, mask_rs2, "rs1,branch_target"),
+    ALIAS("bltz", blt, mask_rs2, "rs1,branch_target"),
+    ALIAS("bgez", bge, mask_rs2, "rs1,branch_target"),
+    INSN(beq, "rs1,rs2,branch_target"),
+    INSN(bne, "rs1,rs2,branch_target"),
+    INSN(blt, "rs1,rs2,branch_target"),
+    INSN(bge, "rs1,rs2,branch_target"),
+    INSN(bltu, "rs1,rs2,branch_target"),
+    INSN(bgeu, "rs1,rs2,branch_target"),
 
-  DEFINE_LTYPE(lui);
-  DEFINE_LTYPE(auipc);
+    INSN(lui, "rd,bigimm"),
+    INSN(auipc, "rd,bigimm"),
 
-  add_insn(new disasm_insn_t("ret", match_jalr | match_rs1_ra, mask_jalr | mask_rd | mask_rs1 | mask_imm, {}));
-  DEFINE_I2TYPE("jr", jalr);
-  add_insn(new disasm_insn_t("jalr", match_jalr | match_rd_ra, mask_jalr | mask_rd | mask_imm, {&xrs1}));
-  DEFINE_ITYPE(jalr);
+    {"ret", match_jalr | match_rs1_ra, mask_jalr | mask_rd | mask_rs1 | mask_imm, ""},
+    ALIAS("jr", jalr, mask_rd | mask_imm, "rs1"),
+    {"jalr", match_jalr | match_rd_ra, mask_jalr | mask_rd | mask_imm, "rs1"},
+    INSN(jalr, "rd,rs1,imm"),
+  });
 
-  add_noarg_insn(this, "nop", match_addi, mask_addi | mask_rd | mask_rs1 | mask_imm);
-  DEFINE_I0TYPE("li", addi);
-  DEFINE_I1TYPE("mv", addi);
-  DEFINE_ITYPE(addi);
-  DEFINE_ITYPE(slti);
-  add_insn(new disasm_insn_t("seqz", match_sltiu | (1 << imm_shift), mask_sltiu | mask_imm, {&xrd, &xrs1}));
-  DEFINE_ITYPE(sltiu);
-  add_insn(new disasm_insn_t("not", match_xori | mask_imm, mask_xori | mask_imm, {&xrd, &xrs1}));
-  DEFINE_ITYPE(xori);
+  add({
+    {"nop", match_addi, mask_addi | mask_rd | mask_rs1 | mask_imm, ""},
+    ALIAS("li", addi, mask_rs1, "rd,imm"),
+    ALIAS("mv", addi, mask_imm, "rd,rs1"),
+    INSN(addi, "rd,rs1,imm"),
+    INSN(slti, "rd,rs1,imm"),
+    {"seqz", match_sltiu | (1 << imm_shift), mask_sltiu | mask_imm, "rd,rs1"},
+    INSN(sltiu, "rd,rs1,imm"),
+    {"not", match_xori | mask_imm, mask_xori | mask_imm, "rd,rs1"},
+    INSN(xori, "rd,rs1,imm"),
 
-  DEFINE_ITYPE_SHIFT(slli);
-  DEFINE_ITYPE_SHIFT(srli);
-  DEFINE_ITYPE_SHIFT(srai);
+    INSN_X(slli, shamt_msb, "rd,rs1,shamt"),
+    INSN_X(srli, shamt_msb, "rd,rs1,shamt"),
+    INSN_X(srai, shamt_msb, "rd,rs1,shamt"),
 
-  DEFINE_ITYPE(ori);
-  DEFINE_ITYPE(andi);
+    INSN(ori, "rd,rs1,imm"),
+    INSN(andi, "rd,rs1,imm"),
+  });
 
-  if (xlen_eq(64)) {
-    DEFINE_I1TYPE("sext.w", addiw);
-    DEFINE_ITYPE(addiw);
+  if (xlen_eq(64)) add({
+    ALIAS("sext.w", addiw, mask_imm, "rd,rs1"),
+    INSN(addiw, "rd,rs1,imm"),
 
-    DEFINE_ITYPE_SHIFTW(slliw);
-    DEFINE_ITYPE_SHIFTW(srliw);
-    DEFINE_ITYPE_SHIFTW(sraiw);
+    INSN_X(slliw, mask_shamt_msb, "rd,rs1,shamt"),
+    INSN_X(srliw, mask_shamt_msb, "rd,rs1,shamt"),
+    INSN_X(sraiw, mask_shamt_msb, "rd,rs1,shamt"),
 
-    DEFINE_RTYPE(addw);
-    DEFINE_RTYPE(subw);
-    DEFINE_RTYPE(sllw);
-    DEFINE_RTYPE(srlw);
-    DEFINE_RTYPE(sraw);
-  }
+    INSN(addw, "rd,rs1,rs2"),
+    INSN(subw, "rd,rs1,rs2"),
+    INSN(sllw, "rd,rs1,rs2"),
+    INSN(srlw, "rd,rs1,rs2"),
+    INSN(sraw, "rd,rs1,rs2"),
+  });
 
-  DEFINE_RTYPE(add);
-  DEFINE_RTYPE(sub);
-  DEFINE_RTYPE(sll);
-  DEFINE_RTYPE(slt);
-  add_insn(new disasm_insn_t("snez", match_sltu, mask_sltu | mask_rs1, {&xrd, &xrs2}));
-  DEFINE_RTYPE(sltu);
-  DEFINE_RTYPE(xor);
-  DEFINE_RTYPE(srl);
-  DEFINE_RTYPE(sra);
-  DEFINE_RTYPE(or);
-  DEFINE_RTYPE(and);
+  add({
+    INSN(add, "rd,rs1,rs2"),
+    INSN(sub, "rd,rs1,rs2"),
+    INSN(sll, "rd,rs1,rs2"),
+    INSN(slt, "rd,rs1,rs2"),
+    {"snez", match_sltu, mask_sltu | mask_rs1, "rd,rs2"},
+    INSN(sltu, "rd,rs1,rs2"),
+    INSN(xor, "rd,rs1,rs2"),
+    INSN(srl, "rd,rs1,rs2"),
+    INSN(sra, "rd,rs1,rs2"),
+    INSN(or, "rd,rs1,rs2"),
+    INSN(and, "rd,rs1,rs2"),
 
-  DEFINE_NOARG(ecall);
-  DEFINE_NOARG(ebreak);
-  DEFINE_NOARG(mret);
-  DEFINE_NOARG(dret);
-  DEFINE_NOARG(wfi);
-  add_insn(new disasm_insn_t("fence", match_fence, mask_fence, {&iorw}));
-  DEFINE_NOARG(fence_i);
+    INSN(ecall, ""),
+    INSN(ebreak, ""),
+    INSN(mret, ""),
+    INSN(dret, ""),
+    INSN(wfi, ""),
+    {"fence", match_fence, mask_fence, "iorw"},
+    INSN(fence_i, ""),
 
-  add_insn(new disasm_insn_t("csrr", match_csrrs, mask_csrrs | mask_rs1, {&xrd, &csr}));
-  add_insn(new disasm_insn_t("csrw", match_csrrw, mask_csrrw | mask_rd, {&csr, &xrs1}));
-  add_insn(new disasm_insn_t("csrs", match_csrrs, mask_csrrs | mask_rd, {&csr, &xrs1}));
-  add_insn(new disasm_insn_t("csrc", match_csrrc, mask_csrrc | mask_rd, {&csr, &xrs1}));
-  add_insn(new disasm_insn_t("csrwi", match_csrrwi, mask_csrrwi | mask_rd, {&csr, &zimm5}));
-  add_insn(new disasm_insn_t("csrsi", match_csrrsi, mask_csrrsi | mask_rd, {&csr, &zimm5}));
-  add_insn(new disasm_insn_t("csrci", match_csrrci, mask_csrrci | mask_rd, {&csr, &zimm5}));
-  add_insn(new disasm_insn_t("csrrw", match_csrrw, mask_csrrw, {&xrd, &csr, &xrs1}));
-  add_insn(new disasm_insn_t("csrrs", match_csrrs, mask_csrrs, {&xrd, &csr, &xrs1}));
-  add_insn(new disasm_insn_t("csrrc", match_csrrc, mask_csrrc, {&xrd, &csr, &xrs1}));
-  add_insn(new disasm_insn_t("csrrwi", match_csrrwi, mask_csrrwi, {&xrd, &csr, &zimm5}));
-  add_insn(new disasm_insn_t("csrrsi", match_csrrsi, mask_csrrsi, {&xrd, &csr, &zimm5}));
-  add_insn(new disasm_insn_t("csrrci", match_csrrci, mask_csrrci, {&xrd, &csr, &zimm5}));
+    {"csrr", match_csrrs, mask_csrrs | mask_rs1, "rd,csr"},
+    {"csrw", match_csrrw, mask_csrrw | mask_rd, "csr,rs1"},
+    {"csrs", match_csrrs, mask_csrrs | mask_rd, "csr,rs1"},
+    {"csrc", match_csrrc, mask_csrrc | mask_rd, "csr,rs1"},
+    {"csrwi", match_csrrwi, mask_csrrwi | mask_rd, "csr,zimm5"},
+    {"csrsi", match_csrrsi, mask_csrrsi | mask_rd, "csr,zimm5"},
+    {"csrci", match_csrrci, mask_csrrci | mask_rd, "csr,zimm5"},
+    {"csrrw", match_csrrw, mask_csrrw, "rd,csr,rs1"},
+    {"csrrs", match_csrrs, mask_csrrs, "rd,csr,rs1"},
+    {"csrrc", match_csrrc, mask_csrrc, "rd,csr,rs1"},
+    {"csrrwi", match_csrrwi, mask_csrrwi, "rd,csr,zimm5"},
+    {"csrrsi", match_csrrsi, mask_csrrsi, "rd,csr,zimm5"},
+    {"csrrci", match_csrrci, mask_csrrci, "rd,csr,zimm5"},
+  });
 
-  if (ext_enabled('S')) {
-    DEFINE_NOARG(sret);
-    DEFINE_SFENCE_TYPE(sfence_vma);
-  }
+  if (ext_enabled('S')) add({
+    INSN(sret, ""),
+    INSN(sfence_vma, "rs1,rs2"),
+  });
 
   if (ext_enabled('M')) {
-    DEFINE_RTYPE(mul);
-    DEFINE_RTYPE(mulh);
-    DEFINE_RTYPE(mulhu);
-    DEFINE_RTYPE(mulhsu);
-    DEFINE_RTYPE(div);
-    DEFINE_RTYPE(divu);
-    DEFINE_RTYPE(rem);
-    DEFINE_RTYPE(remu);
+    add({
+      INSN(mul, "rd,rs1,rs2"),
+      INSN(mulh, "rd,rs1,rs2"),
+      INSN(mulhu, "rd,rs1,rs2"),
+      INSN(mulhsu, "rd,rs1,rs2"),
+      INSN(div, "rd,rs1,rs2"),
+      INSN(divu, "rd,rs1,rs2"),
+      INSN(rem, "rd,rs1,rs2"),
+      INSN(remu, "rd,rs1,rs2"),
+    });
 
-    if (xlen_eq(64)) {
-      DEFINE_RTYPE(mulw);
-      DEFINE_RTYPE(divw);
-      DEFINE_RTYPE(divuw);
-      DEFINE_RTYPE(remw);
-      DEFINE_RTYPE(remuw);
-    }
+    if (xlen_eq(64)) add({
+      INSN(mulw, "rd,rs1,rs2"),
+      INSN(divw, "rd,rs1,rs2"),
+      INSN(divuw, "rd,rs1,rs2"),
+      INSN(remw, "rd,rs1,rs2"),
+      INSN(remuw, "rd,rs1,rs2"),
+    });
   }
 
   if (ext_enabled(EXT_ZBA)) {
-    DEFINE_RTYPE(sh1add);
-    DEFINE_RTYPE(sh2add);
-    DEFINE_RTYPE(sh3add);
-    if (xlen_eq(64)) {
-      DEFINE_ITYPE_SHIFT(slli_uw);
-      add_insn(new disasm_insn_t("zext.w", match_add_uw, mask_add_uw | mask_rs2, {&xrd, &xrs1}));
-      DEFINE_RTYPE(add_uw);
-      DEFINE_RTYPE(sh1add_uw);
-      DEFINE_RTYPE(sh2add_uw);
-      DEFINE_RTYPE(sh3add_uw);
-    }
+    add({
+      INSN(sh1add, "rd,rs1,rs2"),
+      INSN(sh2add, "rd,rs1,rs2"),
+      INSN(sh3add, "rd,rs1,rs2"),
+    });
+    if (xlen_eq(64)) add({
+      INSN_X(slli_uw, shamt_msb, "rd,rs1,shamt"),
+      {"zext.w", match_add_uw, mask_add_uw | mask_rs2, "rd,rs1"},
+      INSN(add_uw, "rd,rs1,rs2"),
+      INSN(sh1add_uw, "rd,rs1,rs2"),
+      INSN(sh2add_uw, "rd,rs1,rs2"),
+      INSN(sh3add_uw, "rd,rs1,rs2"),
+    });
   }
 
   if (ext_enabled(EXT_ZBB)) {
-    DEFINE_RTYPE(ror);
-    DEFINE_RTYPE(rol);
-    DEFINE_ITYPE_SHIFT(rori);
-    DEFINE_R1TYPE(ctz);
-    DEFINE_R1TYPE(clz);
-    DEFINE_R1TYPE(cpop);
-    DEFINE_RTYPE(min);
-    DEFINE_RTYPE(minu);
-    DEFINE_RTYPE(max);
-    DEFINE_RTYPE(maxu);
-    DEFINE_RTYPE(andn);
-    DEFINE_RTYPE(orn);
-    DEFINE_RTYPE(xnor);
-    DEFINE_R1TYPE(sext_b);
-    DEFINE_R1TYPE(sext_h);
-    DEFINE_R1TYPE(rev8);
-    DEFINE_R1TYPE(orc_b);
-    add_insn(new disasm_insn_t("zext.h", (isa->get_max_xlen() == 32 ? match_pack : match_packw), mask_pack | mask_rs2, {&xrd, &xrs1}));
-    if (xlen_eq(64)) {
-      DEFINE_RTYPE(rorw);
-      DEFINE_RTYPE(rolw);
-      DEFINE_ITYPE_SHIFTW(roriw);
-      DEFINE_R1TYPE(ctzw);
-      DEFINE_R1TYPE(clzw);
-      DEFINE_R1TYPE(cpopw);
-    }
+    add({
+      INSN(ror, "rd,rs1,rs2"),
+      INSN(rol, "rd,rs1,rs2"),
+      INSN_X(rori, shamt_msb, "rd,rs1,shamt"),
+      INSN(ctz, "rd,rs1"),
+      INSN(clz, "rd,rs1"),
+      INSN(cpop, "rd,rs1"),
+      INSN(min, "rd,rs1,rs2"),
+      INSN(minu, "rd,rs1,rs2"),
+      INSN(max, "rd,rs1,rs2"),
+      INSN(maxu, "rd,rs1,rs2"),
+      INSN(andn, "rd,rs1,rs2"),
+      INSN(orn, "rd,rs1,rs2"),
+      INSN(xnor, "rd,rs1,rs2"),
+      INSN(sext_b, "rd,rs1"),
+      INSN(sext_h, "rd,rs1"),
+      INSN(rev8, "rd,rs1"),
+      INSN(orc_b, "rd,rs1"),
+      {"zext.h", (isa->get_max_xlen() == 32 ? match_pack : match_packw), mask_pack | mask_rs2, "rd,rs1"},
+    });
+    if (xlen_eq(64)) add({
+      INSN(rorw, "rd,rs1,rs2"),
+      INSN(rolw, "rd,rs1,rs2"),
+      INSN_X(roriw, mask_shamt_msb, "rd,rs1,shamt"),
+      INSN(ctzw, "rd,rs1"),
+      INSN(clzw, "rd,rs1"),
+      INSN(cpopw, "rd,rs1"),
+    });
   }
 
-  if (ext_enabled(EXT_ZBC)) {
-    DEFINE_RTYPE(clmul);
-    DEFINE_RTYPE(clmulh);
-    DEFINE_RTYPE(clmulr);
-  }
+  if (ext_enabled(EXT_ZBC)) add({
+    INSN(clmul, "rd,rs1,rs2"),
+    INSN(clmulh, "rd,rs1,rs2"),
+    INSN(clmulr, "rd,rs1,rs2"),
+  });
 
-  if (ext_enabled(EXT_ZBS)) {
-    DEFINE_RTYPE(bclr);
-    DEFINE_RTYPE(binv);
-    DEFINE_RTYPE(bset);
-    DEFINE_RTYPE(bext);
-    DEFINE_ITYPE_SHIFT(bclri);
-    DEFINE_ITYPE_SHIFT(binvi);
-    DEFINE_ITYPE_SHIFT(bseti);
-    DEFINE_ITYPE_SHIFT(bexti);
-  }
+  if (ext_enabled(EXT_ZBS)) add({
+    INSN(bclr, "rd,rs1,rs2"),
+    INSN(binv, "rd,rs1,rs2"),
+    INSN(bset, "rd,rs1,rs2"),
+    INSN(bext, "rd,rs1,rs2"),
+    INSN_X(bclri, shamt_msb, "rd,rs1,shamt"),
+    INSN_X(binvi, shamt_msb, "rd,rs1,shamt"),
+    INSN_X(bseti, shamt_msb, "rd,rs1,shamt"),
+    INSN_X(bexti, shamt_msb, "rd,rs1,shamt"),
+  });
 
   if (ext_enabled(EXT_ZBKB)) {
-    DEFINE_R1TYPE(brev8);
-    DEFINE_R1TYPE(rev8);
-    DEFINE_RTYPE(pack);
-    DEFINE_RTYPE(packh);
-    if (xlen_eq(64)) {
-      DEFINE_RTYPE(packw);
-    }
+    add({
+      INSN(brev8, "rd,rs1"),
+      INSN(rev8, "rd,rs1"),
+      INSN(pack, "rd,rs1,rs2"),
+      INSN(packh, "rd,rs1,rs2"),
+    });
+    if (xlen_eq(64)) add({
+      INSN(packw, "rd,rs1,rs2"),
+    });
   }
 
-  if (ext_enabled(EXT_SVINVAL)) {
-    DEFINE_NOARG(sfence_w_inval);
-    DEFINE_NOARG(sfence_inval_ir);
-    DEFINE_SFENCE_TYPE(sinval_vma);
-    DEFINE_SFENCE_TYPE(hinval_vvma);
-    DEFINE_SFENCE_TYPE(hinval_gvma);
-  }
+  if (ext_enabled(EXT_SVINVAL)) add({
+    INSN(sfence_w_inval, ""),
+    INSN(sfence_inval_ir, ""),
+    INSN(sinval_vma, "rs1,rs2"),
+    INSN(hinval_vvma, "rs1,rs2"),
+    INSN(hinval_gvma, "rs1,rs2"),
+  });
 
-  if (ext_enabled('F')) {
-    DEFINE_FLOAD(flw)
-    DEFINE_FSTORE(fsw)
-    DEFINE_XFTYPE(fmv_w_x);
-    DEFINE_FXTYPE(fmv_x_w);
-  }
+  if (ext_enabled('F')) add({
+    INSN(flw, "frd,imm(rs1)"),
+    INSN(fsw, "frs2,simm(rs1)"),
+    INSN(fmv_w_x, "frd,rs1"),
+    INSN(fmv_x_w, "rd,frs1"),
+  });
 
   if (ext_enabled('F') || ext_enabled(EXT_ZFINX)) {
-    DEFINE_FRTYPE(fadd_s);
-    DEFINE_FRTYPE(fsub_s);
-    DEFINE_FRTYPE(fmul_s);
-    DEFINE_FRTYPE(fdiv_s);
-    DEFINE_FR1TYPE(fsqrt_s);
-    DEFINE_FRTYPE(fmin_s);
-    DEFINE_FRTYPE(fmax_s);
-    DEFINE_FR3TYPE(fmadd_s);
-    DEFINE_FR3TYPE(fmsub_s);
-    DEFINE_FR3TYPE(fnmadd_s);
-    DEFINE_FR3TYPE(fnmsub_s);
-    DEFINE_FRTYPE(fsgnj_s);
-    DEFINE_FRTYPE(fsgnjn_s);
-    DEFINE_FRTYPE(fsgnjx_s);
-    DEFINE_FR1TYPE(fcvt_s_d);
-    DEFINE_FR1TYPE(fcvt_s_q);
-    DEFINE_XFTYPE(fcvt_s_w);
-    DEFINE_XFTYPE(fcvt_s_wu);
-    DEFINE_XFTYPE(fcvt_s_wu);
-    DEFINE_FXTYPE(fcvt_w_s);
-    DEFINE_FXTYPE(fcvt_wu_s);
-    DEFINE_FXTYPE(fclass_s);
-    DEFINE_FX2TYPE(feq_s);
-    DEFINE_FX2TYPE(flt_s);
-    DEFINE_FX2TYPE(fle_s);
+    add({
+      INSN(fadd_s, "frd,frs1,frs2"),
+      INSN(fsub_s, "frd,frs1,frs2"),
+      INSN(fmul_s, "frd,frs1,frs2"),
+      INSN(fdiv_s, "frd,frs1,frs2"),
+      INSN(fsqrt_s, "frd,frs1"),
+      INSN(fmin_s, "frd,frs1,frs2"),
+      INSN(fmax_s, "frd,frs1,frs2"),
+      INSN(fmadd_s, "frd,frs1,frs2,frs3"),
+      INSN(fmsub_s, "frd,frs1,frs2,frs3"),
+      INSN(fnmadd_s, "frd,frs1,frs2,frs3"),
+      INSN(fnmsub_s, "frd,frs1,frs2,frs3"),
+      INSN(fsgnj_s, "frd,frs1,frs2"),
+      INSN(fsgnjn_s, "frd,frs1,frs2"),
+      INSN(fsgnjx_s, "frd,frs1,frs2"),
+      INSN(fcvt_s_d, "frd,frs1"),
+      INSN(fcvt_s_q, "frd,frs1"),
+      INSN(fcvt_s_w, "frd,rs1"),
+      INSN(fcvt_s_wu, "frd,rs1"),
+      INSN(fcvt_s_wu, "frd,rs1"),
+      INSN(fcvt_w_s, "rd,frs1"),
+      INSN(fcvt_wu_s, "rd,frs1"),
+      INSN(fclass_s, "rd,frs1"),
+      INSN(feq_s, "rd,frs1,frs2"),
+      INSN(flt_s, "rd,frs1,frs2"),
+      INSN(fle_s, "rd,frs1,frs2"),
+    });
 
-    if (xlen_eq(64)) {
-      DEFINE_XFTYPE(fcvt_s_l);
-      DEFINE_XFTYPE(fcvt_s_lu);
-      DEFINE_FXTYPE(fcvt_l_s);
-      DEFINE_FXTYPE(fcvt_lu_s);
-    }
+    if (xlen_eq(64)) add({
+      INSN(fcvt_s_l, "frd,rs1"),
+      INSN(fcvt_s_lu, "frd,rs1"),
+      INSN(fcvt_l_s, "rd,frs1"),
+      INSN(fcvt_lu_s, "rd,frs1"),
+    });
   }
 
   if (ext_enabled('D')) {
-    DEFINE_FLOAD(fld)
-    DEFINE_FSTORE(fsd)
+    add({
+      INSN(fld, "frd,imm(rs1)"),
+      INSN(fsd, "frs2,simm(rs1)"),
+    });
 
-    if (xlen_eq(64)) {
-      DEFINE_XFTYPE(fmv_d_x);
-      DEFINE_FXTYPE(fmv_x_d);
-    }
+    if (xlen_eq(64)) add({
+      INSN(fmv_d_x, "frd,rs1"),
+      INSN(fmv_x_d, "rd,frs1"),
+    });
   }
 
   if (ext_enabled('D') || ext_enabled(EXT_ZDINX)) {
-    DEFINE_FRTYPE(fadd_d);
-    DEFINE_FRTYPE(fsub_d);
-    DEFINE_FRTYPE(fmul_d);
-    DEFINE_FRTYPE(fdiv_d);
-    DEFINE_FR1TYPE(fsqrt_d);
-    DEFINE_FRTYPE(fmin_d);
-    DEFINE_FRTYPE(fmax_d);
-    DEFINE_FR3TYPE(fmadd_d);
-    DEFINE_FR3TYPE(fmsub_d);
-    DEFINE_FR3TYPE(fnmadd_d);
-    DEFINE_FR3TYPE(fnmsub_d);
-    DEFINE_FRTYPE(fsgnj_d);
-    DEFINE_FRTYPE(fsgnjn_d);
-    DEFINE_FRTYPE(fsgnjx_d);
-    DEFINE_FR1TYPE(fcvt_d_s);
-    DEFINE_FR1TYPE(fcvt_d_q);
-    DEFINE_XFTYPE(fcvt_d_w);
-    DEFINE_XFTYPE(fcvt_d_wu);
-    DEFINE_XFTYPE(fcvt_d_wu);
-    DEFINE_FXTYPE(fcvt_w_d);
-    DEFINE_FXTYPE(fcvt_wu_d);
-    DEFINE_FXTYPE(fclass_d);
-    DEFINE_FX2TYPE(feq_d);
-    DEFINE_FX2TYPE(flt_d);
-    DEFINE_FX2TYPE(fle_d);
+    add({
+      INSN(fadd_d, "frd,frs1,frs2"),
+      INSN(fsub_d, "frd,frs1,frs2"),
+      INSN(fmul_d, "frd,frs1,frs2"),
+      INSN(fdiv_d, "frd,frs1,frs2"),
+      INSN(fsqrt_d, "frd,frs1"),
+      INSN(fmin_d, "frd,frs1,frs2"),
+      INSN(fmax_d, "frd,frs1,frs2"),
+      INSN(fmadd_d, "frd,frs1,frs2,frs3"),
+      INSN(fmsub_d, "frd,frs1,frs2,frs3"),
+      INSN(fnmadd_d, "frd,frs1,frs2,frs3"),
+      INSN(fnmsub_d, "frd,frs1,frs2,frs3"),
+      INSN(fsgnj_d, "frd,frs1,frs2"),
+      INSN(fsgnjn_d, "frd,frs1,frs2"),
+      INSN(fsgnjx_d, "frd,frs1,frs2"),
+      INSN(fcvt_d_s, "frd,frs1"),
+      INSN(fcvt_d_q, "frd,frs1"),
+      INSN(fcvt_d_w, "frd,rs1"),
+      INSN(fcvt_d_wu, "frd,rs1"),
+      INSN(fcvt_d_wu, "frd,rs1"),
+      INSN(fcvt_w_d, "rd,frs1"),
+      INSN(fcvt_wu_d, "rd,frs1"),
+      INSN(fclass_d, "rd,frs1"),
+      INSN(feq_d, "rd,frs1,frs2"),
+      INSN(flt_d, "rd,frs1,frs2"),
+      INSN(fle_d, "rd,frs1,frs2"),
+    });
 
-    if (xlen_eq(64)) {
-      DEFINE_XFTYPE(fcvt_d_l);
-      DEFINE_XFTYPE(fcvt_d_lu);
-      DEFINE_FXTYPE(fcvt_l_d);
-      DEFINE_FXTYPE(fcvt_lu_d);
-    }
+    if (xlen_eq(64)) add({
+      INSN(fcvt_d_l, "frd,rs1"),
+      INSN(fcvt_d_lu, "frd,rs1"),
+      INSN(fcvt_l_d, "rd,frs1"),
+      INSN(fcvt_lu_d, "rd,frs1"),
+    });
   }
 
   if (ext_enabled(EXT_ZFA)) {
-    DEFINE_FLITYPE(fli_s);
-    DEFINE_FRTYPE(fminm_s);
-    DEFINE_FRTYPE(fmaxm_s);
-    DEFINE_FR1TYPE(fround_s);
-    DEFINE_FR1TYPE(froundnx_s);
-    DEFINE_FX2TYPE(fleq_s);
-    DEFINE_FX2TYPE(fltq_s);
+    add({
+      INSN(fli_s, "frd,fli_imm"),
+      INSN(fminm_s, "frd,frs1,frs2"),
+      INSN(fmaxm_s, "frd,frs1,frs2"),
+      INSN(fround_s, "frd,frs1"),
+      INSN(froundnx_s, "frd,frs1"),
+      INSN(fleq_s, "rd,frs1,frs2"),
+      INSN(fltq_s, "rd,frs1,frs2"),
+    });
 
-    if (ext_enabled(EXT_ZFH) || ext_enabled(EXT_ZVFH)) {
-      DEFINE_FLITYPE(fli_h);
-      DEFINE_FRTYPE(fminm_h);
-      DEFINE_FRTYPE(fmaxm_h);
-      DEFINE_FR1TYPE(fround_h);
-      DEFINE_FR1TYPE(froundnx_h);
-      DEFINE_FX2TYPE(fleq_h);
-      DEFINE_FX2TYPE(fltq_h);
-    }
+    if (ext_enabled(EXT_ZFH) || ext_enabled(EXT_ZVFH)) add({
+      INSN(fli_h, "frd,fli_imm"),
+      INSN(fminm_h, "frd,frs1,frs2"),
+      INSN(fmaxm_h, "frd,frs1,frs2"),
+      INSN(fround_h, "frd,frs1"),
+      INSN(froundnx_h, "frd,frs1"),
+      INSN(fleq_h, "rd,frs1,frs2"),
+      INSN(fltq_h, "rd,frs1,frs2"),
+    });
 
     if (ext_enabled('D')) {
-      DEFINE_FLITYPE(fli_d);
-      DEFINE_FRTYPE(fminm_d);
-      DEFINE_FRTYPE(fmaxm_d);
-      DEFINE_FR1TYPE(fround_d);
-      DEFINE_FR1TYPE(froundnx_d);
-      DEFINE_FX2TYPE(fleq_d);
-      DEFINE_FX2TYPE(fltq_d);
-      DEFINE_FXRTYPE(fcvtmod_w_d);
+      add({
+        INSN(fli_d, "frd,fli_imm"),
+        INSN(fminm_d, "frd,frs1,frs2"),
+        INSN(fmaxm_d, "frd,frs1,frs2"),
+        INSN(fround_d, "frd,frs1"),
+        INSN(froundnx_d, "frd,frs1"),
+        INSN(fleq_d, "rd,frs1,frs2"),
+        INSN(fltq_d, "rd,frs1,frs2"),
+        INSN(fcvtmod_w_d, "rd,frs1,rm"),
+      });
 
-      if (xlen_eq(32)) {
-        DEFINE_XF2TYPE(fmvp_d_x);
-        DEFINE_FXTYPE(fmvh_x_d);
-      }
+      if (xlen_eq(32)) add({
+        INSN(fmvp_d_x, "frd,rs1,rs2"),
+        INSN(fmvh_x_d, "rd,frs1"),
+      });
     }
 
     if (ext_enabled('Q')) {
-      DEFINE_FLITYPE(fli_q);
-      DEFINE_FRTYPE(fminm_q);
-      DEFINE_FRTYPE(fmaxm_q);
-      DEFINE_FR1TYPE(fround_q);
-      DEFINE_FR1TYPE(froundnx_q);
-      DEFINE_FX2TYPE(fleq_q);
-      DEFINE_FX2TYPE(fltq_q);
+      add({
+        INSN(fli_q, "frd,fli_imm"),
+        INSN(fminm_q, "frd,frs1,frs2"),
+        INSN(fmaxm_q, "frd,frs1,frs2"),
+        INSN(fround_q, "frd,frs1"),
+        INSN(froundnx_q, "frd,frs1"),
+        INSN(fleq_q, "rd,frs1,frs2"),
+        INSN(fltq_q, "rd,frs1,frs2"),
+      });
 
-      if (xlen_eq(64)) {
-        DEFINE_XF2TYPE(fmvp_q_x);
-        DEFINE_FXTYPE(fmvh_x_q);
-      }
+      if (xlen_eq(64)) add({
+        INSN(fmvp_q_x, "frd,rs1,rs2"),
+        INSN(fmvh_x_q, "rd,frs1"),
+      });
     }
   }
 
-  if (ext_enabled(EXT_ZFH)) {
-    DEFINE_FRTYPE(fadd_h);
-    DEFINE_FRTYPE(fsub_h);
-    DEFINE_FRTYPE(fmul_h);
-    DEFINE_FRTYPE(fdiv_h);
-    DEFINE_FR1TYPE(fsqrt_h);
-    DEFINE_FRTYPE(fmin_h);
-    DEFINE_FRTYPE(fmax_h);
-    DEFINE_FR3TYPE(fmadd_h);
-    DEFINE_FR3TYPE(fmsub_h);
-    DEFINE_FR3TYPE(fnmadd_h);
-    DEFINE_FR3TYPE(fnmsub_h);
-    DEFINE_FRTYPE(fsgnj_h);
-    DEFINE_FRTYPE(fsgnjn_h);
-    DEFINE_FRTYPE(fsgnjx_h);
-    DEFINE_XFTYPE(fcvt_h_l);
-    DEFINE_XFTYPE(fcvt_h_lu);
-    DEFINE_XFTYPE(fcvt_h_w);
-    DEFINE_XFTYPE(fcvt_h_wu);
-    DEFINE_XFTYPE(fcvt_h_wu);
-    DEFINE_FXTYPE(fcvt_l_h);
-    DEFINE_FXTYPE(fcvt_lu_h);
-    DEFINE_FXTYPE(fcvt_w_h);
-    DEFINE_FXTYPE(fcvt_wu_h);
-    DEFINE_FXTYPE(fclass_h);
-    DEFINE_FX2TYPE(feq_h);
-    DEFINE_FX2TYPE(flt_h);
-    DEFINE_FX2TYPE(fle_h);
-  }
+  if (ext_enabled(EXT_ZFH)) add({
+    INSN(fadd_h, "frd,frs1,frs2"),
+    INSN(fsub_h, "frd,frs1,frs2"),
+    INSN(fmul_h, "frd,frs1,frs2"),
+    INSN(fdiv_h, "frd,frs1,frs2"),
+    INSN(fsqrt_h, "frd,frs1"),
+    INSN(fmin_h, "frd,frs1,frs2"),
+    INSN(fmax_h, "frd,frs1,frs2"),
+    INSN(fmadd_h, "frd,frs1,frs2,frs3"),
+    INSN(fmsub_h, "frd,frs1,frs2,frs3"),
+    INSN(fnmadd_h, "frd,frs1,frs2,frs3"),
+    INSN(fnmsub_h, "frd,frs1,frs2,frs3"),
+    INSN(fsgnj_h, "frd,frs1,frs2"),
+    INSN(fsgnjn_h, "frd,frs1,frs2"),
+    INSN(fsgnjx_h, "frd,frs1,frs2"),
+    INSN(fcvt_h_l, "frd,rs1"),
+    INSN(fcvt_h_lu, "frd,rs1"),
+    INSN(fcvt_h_w, "frd,rs1"),
+    INSN(fcvt_h_wu, "frd,rs1"),
+    INSN(fcvt_h_wu, "frd,rs1"),
+    INSN(fcvt_l_h, "rd,frs1"),
+    INSN(fcvt_lu_h, "rd,frs1"),
+    INSN(fcvt_w_h, "rd,frs1"),
+    INSN(fcvt_wu_h, "rd,frs1"),
+    INSN(fclass_h, "rd,frs1"),
+    INSN(feq_h, "rd,frs1,frs2"),
+    INSN(flt_h, "rd,frs1,frs2"),
+    INSN(fle_h, "rd,frs1,frs2"),
+  });
 
-  if (ext_enabled(EXT_ZHINX)) {
-    DEFINE_RTYPE(fadd_h);
-    DEFINE_RTYPE(fsub_h);
-    DEFINE_RTYPE(fmul_h);
-    DEFINE_RTYPE(fdiv_h);
-    DEFINE_R1TYPE(fsqrt_h);
-    DEFINE_RTYPE(fmin_h);
-    DEFINE_RTYPE(fmax_h);
-    DEFINE_R3TYPE(fmadd_h);
-    DEFINE_R3TYPE(fmsub_h);
-    DEFINE_R3TYPE(fnmadd_h);
-    DEFINE_R3TYPE(fnmsub_h);
-    DEFINE_RTYPE(fsgnj_h);
-    DEFINE_RTYPE(fsgnjn_h);
-    DEFINE_RTYPE(fsgnjx_h);
-    DEFINE_R1TYPE(fcvt_h_l);
-    DEFINE_R1TYPE(fcvt_h_lu);
-    DEFINE_R1TYPE(fcvt_h_w);
-    DEFINE_R1TYPE(fcvt_h_wu);
-    DEFINE_R1TYPE(fcvt_h_wu);
-    DEFINE_R1TYPE(fcvt_l_h);
-    DEFINE_R1TYPE(fcvt_lu_h);
-    DEFINE_R1TYPE(fcvt_w_h);
-    DEFINE_R1TYPE(fcvt_wu_h);
-    DEFINE_R1TYPE(fclass_h);
-    DEFINE_RTYPE(feq_h);
-    DEFINE_RTYPE(flt_h);
-    DEFINE_RTYPE(fle_h);
-  }
+  if (ext_enabled(EXT_ZHINX)) add({
+    INSN(fadd_h, "rd,rs1,rs2"),
+    INSN(fsub_h, "rd,rs1,rs2"),
+    INSN(fmul_h, "rd,rs1,rs2"),
+    INSN(fdiv_h, "rd,rs1,rs2"),
+    INSN(fsqrt_h, "rd,rs1"),
+    INSN(fmin_h, "rd,rs1,rs2"),
+    INSN(fmax_h, "rd,rs1,rs2"),
+    INSN(fmadd_h, "rd,rs1,rs2,rs3"),
+    INSN(fmsub_h, "rd,rs1,rs2,rs3"),
+    INSN(fnmadd_h, "rd,rs1,rs2,rs3"),
+    INSN(fnmsub_h, "rd,rs1,rs2,rs3"),
+    INSN(fsgnj_h, "rd,rs1,rs2"),
+    INSN(fsgnjn_h, "rd,rs1,rs2"),
+    INSN(fsgnjx_h, "rd,rs1,rs2"),
+    INSN(fcvt_h_l, "rd,rs1"),
+    INSN(fcvt_h_lu, "rd,rs1"),
+    INSN(fcvt_h_w, "rd,rs1"),
+    INSN(fcvt_h_wu, "rd,rs1"),
+    INSN(fcvt_h_wu, "rd,rs1"),
+    INSN(fcvt_l_h, "rd,rs1"),
+    INSN(fcvt_lu_h, "rd,rs1"),
+    INSN(fcvt_w_h, "rd,rs1"),
+    INSN(fcvt_wu_h, "rd,rs1"),
+    INSN(fclass_h, "rd,rs1"),
+    INSN(feq_h, "rd,rs1,rs2"),
+    INSN(flt_h, "rd,rs1,rs2"),
+    INSN(fle_h, "rd,rs1,rs2"),
+  });
 
-  if (ext_enabled(EXT_ZFHMIN)) {
-    DEFINE_FR1TYPE(fcvt_h_s);
-    DEFINE_FR1TYPE(fcvt_h_d);
-    DEFINE_FR1TYPE(fcvt_h_q);
-    DEFINE_FR1TYPE(fcvt_s_h);
-    DEFINE_FR1TYPE(fcvt_d_h);
-    DEFINE_FR1TYPE(fcvt_q_h);
-  }
+  if (ext_enabled(EXT_ZFHMIN)) add({
+    INSN(fcvt_h_s, "frd,frs1"),
+    INSN(fcvt_h_d, "frd,frs1"),
+    INSN(fcvt_h_q, "frd,frs1"),
+    INSN(fcvt_s_h, "frd,frs1"),
+    INSN(fcvt_d_h, "frd,frs1"),
+    INSN(fcvt_q_h, "frd,frs1"),
+  });
 
-  if (ext_enabled(EXT_INTERNAL_ZFH_MOVE)) {
-    DEFINE_FLOAD(flh)
-    DEFINE_FSTORE(fsh)
-    DEFINE_XFTYPE(fmv_h_x);
-    DEFINE_FXTYPE(fmv_x_h);
-  }
+  if (ext_enabled(EXT_INTERNAL_ZFH_MOVE)) add({
+    INSN(flh, "frd,imm(rs1)"),
+    INSN(fsh, "frs2,simm(rs1)"),
+    INSN(fmv_h_x, "frd,rs1"),
+    INSN(fmv_x_h, "rd,frs1"),
+  });
 
-  if (ext_enabled(EXT_ZHINXMIN)) {
-    DEFINE_R1TYPE(fcvt_h_s);
-    DEFINE_R1TYPE(fcvt_h_d);
-    //DEFINE_R1TYPE(fcvt_h_q);
-    DEFINE_R1TYPE(fcvt_s_h);
-    DEFINE_R1TYPE(fcvt_d_h);
-    //DEFINE_R1TYPE(fcvt_q_h);
-  }
+  if (ext_enabled(EXT_ZHINXMIN)) add({
+    INSN(fcvt_h_s, "rd,rs1"),
+    INSN(fcvt_h_d, "rd,rs1"),
+    // INSN(fcvt_h_q, "rd,rs1"),
+    INSN(fcvt_s_h, "rd,rs1"),
+    INSN(fcvt_d_h, "rd,rs1"),
+    // INSN(fcvt_q_h, "rd,rs1"),
+  });
 
-  if (ext_enabled(EXT_ZIBI)) {
-     DEFINE_BIMMTYPE(beqi)
-     DEFINE_BIMMTYPE(bnei)
-  }
+  if (ext_enabled(EXT_ZIBI)) add({
+     INSN(beqi, "rs1,b_imm5,branch_target"),
+     INSN(bnei, "rs1,b_imm5,branch_target"),
+  });
 
-  if (ext_enabled('Q')) {
-    DEFINE_FLOAD(flq)
-    DEFINE_FSTORE(fsq)
-    DEFINE_FRTYPE(fadd_q);
-    DEFINE_FRTYPE(fsub_q);
-    DEFINE_FRTYPE(fmul_q);
-    DEFINE_FRTYPE(fdiv_q);
-    DEFINE_FR1TYPE(fsqrt_q);
-    DEFINE_FRTYPE(fmin_q);
-    DEFINE_FRTYPE(fmax_q);
-    DEFINE_FR3TYPE(fmadd_q);
-    DEFINE_FR3TYPE(fmsub_q);
-    DEFINE_FR3TYPE(fnmadd_q);
-    DEFINE_FR3TYPE(fnmsub_q);
-    DEFINE_FRTYPE(fsgnj_q);
-    DEFINE_FRTYPE(fsgnjn_q);
-    DEFINE_FRTYPE(fsgnjx_q);
-    DEFINE_FR1TYPE(fcvt_q_s);
-    DEFINE_FR1TYPE(fcvt_q_d);
-    DEFINE_XFTYPE(fcvt_q_l);
-    DEFINE_XFTYPE(fcvt_q_lu);
-    DEFINE_XFTYPE(fcvt_q_w);
-    DEFINE_XFTYPE(fcvt_q_wu);
-    DEFINE_XFTYPE(fcvt_q_wu);
-    DEFINE_FXTYPE(fcvt_l_q);
-    DEFINE_FXTYPE(fcvt_lu_q);
-    DEFINE_FXTYPE(fcvt_w_q);
-    DEFINE_FXTYPE(fcvt_wu_q);
-    DEFINE_FXTYPE(fclass_q);
-    DEFINE_FX2TYPE(feq_q);
-    DEFINE_FX2TYPE(flt_q);
-    DEFINE_FX2TYPE(fle_q);
-  }
+  if (ext_enabled('Q')) add({
+    INSN(flq, "frd,imm(rs1)"),
+    INSN(fsq, "frs2,simm(rs1)"),
+    INSN(fadd_q, "frd,frs1,frs2"),
+    INSN(fsub_q, "frd,frs1,frs2"),
+    INSN(fmul_q, "frd,frs1,frs2"),
+    INSN(fdiv_q, "frd,frs1,frs2"),
+    INSN(fsqrt_q, "frd,frs1"),
+    INSN(fmin_q, "frd,frs1,frs2"),
+    INSN(fmax_q, "frd,frs1,frs2"),
+    INSN(fmadd_q, "frd,frs1,frs2,frs3"),
+    INSN(fmsub_q, "frd,frs1,frs2,frs3"),
+    INSN(fnmadd_q, "frd,frs1,frs2,frs3"),
+    INSN(fnmsub_q, "frd,frs1,frs2,frs3"),
+    INSN(fsgnj_q, "frd,frs1,frs2"),
+    INSN(fsgnjn_q, "frd,frs1,frs2"),
+    INSN(fsgnjx_q, "frd,frs1,frs2"),
+    INSN(fcvt_q_s, "frd,frs1"),
+    INSN(fcvt_q_d, "frd,frs1"),
+    INSN(fcvt_q_l, "frd,rs1"),
+    INSN(fcvt_q_lu, "frd,rs1"),
+    INSN(fcvt_q_w, "frd,rs1"),
+    INSN(fcvt_q_wu, "frd,rs1"),
+    INSN(fcvt_q_wu, "frd,rs1"),
+    INSN(fcvt_l_q, "rd,frs1"),
+    INSN(fcvt_lu_q, "rd,frs1"),
+    INSN(fcvt_w_q, "rd,frs1"),
+    INSN(fcvt_wu_q, "rd,frs1"),
+    INSN(fclass_q, "rd,frs1"),
+    INSN(feq_q, "rd,frs1,frs2"),
+    INSN(flt_q, "rd,frs1,frs2"),
+    INSN(fle_q, "rd,frs1,frs2"),
+  });
 
-  if (ext_enabled(EXT_ZFBFMIN)) {
-    DEFINE_FR1TYPE(fcvt_bf16_s);
-    DEFINE_FR1TYPE(fcvt_s_bf16);
-  }
+  if (ext_enabled(EXT_ZFBFMIN)) add({
+    INSN(fcvt_bf16_s, "frd,frs1"),
+    INSN(fcvt_s_bf16, "frd,frs1"),
+  });
 
   // ext-h
-  if (ext_enabled('H')) {
-    DEFINE_XLOAD_BASE(hlv_b)
-    DEFINE_XLOAD_BASE(hlv_bu)
-    DEFINE_XLOAD_BASE(hlv_h)
-    DEFINE_XLOAD_BASE(hlv_hu)
-    DEFINE_XLOAD_BASE(hlv_w)
-    DEFINE_XLOAD_BASE(hlv_wu)
-    DEFINE_XLOAD_BASE(hlv_d)
+  if (ext_enabled('H')) add({
+    INSN(hlv_b, "rd,(rs1)"),
+    INSN(hlv_bu, "rd,(rs1)"),
+    INSN(hlv_h, "rd,(rs1)"),
+    INSN(hlv_hu, "rd,(rs1)"),
+    INSN(hlv_w, "rd,(rs1)"),
+    INSN(hlv_wu, "rd,(rs1)"),
+    INSN(hlv_d, "rd,(rs1)"),
 
-    DEFINE_XLOAD_BASE(hlvx_hu)
-    DEFINE_XLOAD_BASE(hlvx_wu)
+    INSN(hlvx_hu, "rd,(rs1)"),
+    INSN(hlvx_wu, "rd,(rs1)"),
 
-    DEFINE_XSTORE_BASE(hsv_b)
-    DEFINE_XSTORE_BASE(hsv_h)
-    DEFINE_XSTORE_BASE(hsv_w)
-    DEFINE_XSTORE_BASE(hsv_d)
+    INSN(hsv_b, "rs2,(rs1)"),
+    INSN(hsv_h, "rs2,(rs1)"),
+    INSN(hsv_w, "rs2,(rs1)"),
+    INSN(hsv_d, "rs2,(rs1)"),
 
-    DEFINE_SFENCE_TYPE(hfence_gvma);
-    DEFINE_SFENCE_TYPE(hfence_vvma);
-  }
+    INSN(hfence_gvma, "rs1,rs2"),
+    INSN(hfence_vvma, "rs1,rs2"),
+  });
 
   // ext-c
   if (ext_enabled(EXT_ZCA)) {
-    DISASM_INSN("c.ebreak", c_add, mask_rd | mask_rvc_rs2, {});
-    add_insn(new disasm_insn_t("c.ret", match_c_jr | match_rd_ra, mask_c_jr | mask_rd | mask_rvc_imm, {}));
-    DISASM_INSN("c.jr", c_jr, mask_rvc_imm, {&rvc_rs1});
-    DISASM_INSN("c.jalr", c_jalr, mask_rvc_imm, {&rvc_rs1});
-    DISASM_INSN("c.nop", c_addi, mask_rd | mask_rvc_imm, {});
-    DISASM_INSN("c.addi16sp", c_addi16sp, mask_rd, {&rvc_sp, &rvc_addi16sp_imm});
-    DISASM_INSN("c.addi4spn", c_addi4spn, 0, {&rvc_rs2s, &rvc_sp, &rvc_addi4spn_imm});
-    DISASM_INSN("c.li", c_li, 0, {&xrd, &rvc_imm});
-    DISASM_INSN("c.lui", c_lui, 0, {&xrd, &rvc_uimm});
-    DISASM_INSN("c.addi", c_addi, 0, {&xrd, &rvc_imm});
-    // On RV32 the shift amount is 5 bits, so bit 12 is reserved.
-    const uint32_t rvc_shamt_msb = xlen_eq(64) ? 0 : mask_rvc_shamt_msb;
-    DISASM_INSN("c.slli", c_slli, rvc_shamt_msb, {&rvc_rs1, &rvc_shamt});
-    DISASM_INSN("c.srli", c_srli, rvc_shamt_msb, {&rvc_rs1s, &rvc_shamt});
-    DISASM_INSN("c.srai", c_srai, rvc_shamt_msb, {&rvc_rs1s, &rvc_shamt});
-    DISASM_INSN("c.andi", c_andi, 0, {&rvc_rs1s, &rvc_imm});
-    DISASM_INSN("c.mv", c_mv, 0, {&xrd, &rvc_rs2});
-    DISASM_INSN("c.add", c_add, 0, {&xrd, &rvc_rs2});
-    DISASM_INSN("c.sub", c_sub, 0, {&rvc_rs1s, &rvc_rs2s});
-    DISASM_INSN("c.and", c_and, 0, {&rvc_rs1s, &rvc_rs2s});
-    DISASM_INSN("c.or", c_or, 0, {&rvc_rs1s, &rvc_rs2s});
-    DISASM_INSN("c.xor", c_xor, 0, {&rvc_rs1s, &rvc_rs2s});
-    DISASM_INSN("c.lwsp", c_lwsp, 0, {&xrd, &rvc_lwsp_address});
-    DISASM_INSN("c.swsp", c_swsp, 0, {&rvc_rs2, &rvc_swsp_address});
-    DISASM_INSN("c.lw", c_lw, 0, {&rvc_rs2s, &rvc_lw_address});
-    DISASM_INSN("c.sw", c_sw, 0, {&rvc_rs2s, &rvc_lw_address});
-    DISASM_INSN("c.beqz", c_beqz, 0, {&rvc_rs1s, &rvc_branch_target});
-    DISASM_INSN("c.bnez", c_bnez, 0, {&rvc_rs1s, &rvc_branch_target});
-    DISASM_INSN("c.j", c_j, 0, {&rvc_jump_target});
-    if (xlen_eq_strict(32)) {
-      DISASM_INSN("c.jal", c_jal, 0, {&rvc_jump_target});
-    } else {
-      DISASM_INSN("c.addiw", c_addiw, 0, {&xrd, &rvc_imm});
-    }
+    add({
+      ALIAS("c.ebreak", c_add, mask_rd | mask_rvc_rs2, ""),
+      {"c.ret", match_c_jr | match_rd_ra, mask_c_jr | mask_rd | mask_rvc_imm, ""},
+      INSN_X(c_jr, mask_rvc_imm, "rvc_rs1"),
+      INSN_X(c_jalr, mask_rvc_imm, "rvc_rs1"),
+      ALIAS("c.nop", c_addi, mask_rd | mask_rvc_imm, ""),
+      INSN_X(c_addi16sp, mask_rd, "rvc_sp,rvc_addi16sp_imm"),
+      INSN(c_addi4spn, "rvc_rs2s,rvc_sp,rvc_addi4spn_imm"),
+      INSN(c_li, "rd,rvc_imm"),
+      INSN(c_lui, "rd,rvc_uimm"),
+      INSN(c_addi, "rd,rvc_imm"),
+      // On RV32 the shift amount is 5 bits, so bit 12 is reserved.
+      INSN_X(c_slli, rvc_shamt_msb, "rvc_rs1,rvc_shamt"),
+      INSN_X(c_srli, rvc_shamt_msb, "rvc_rs1s,rvc_shamt"),
+      INSN_X(c_srai, rvc_shamt_msb, "rvc_rs1s,rvc_shamt"),
+      INSN(c_andi, "rvc_rs1s,rvc_imm"),
+      INSN(c_mv, "rd,rvc_rs2"),
+      INSN(c_add, "rd,rvc_rs2"),
+      INSN(c_sub, "rvc_rs1s,rvc_rs2s"),
+      INSN(c_and, "rvc_rs1s,rvc_rs2s"),
+      INSN(c_or, "rvc_rs1s,rvc_rs2s"),
+      INSN(c_xor, "rvc_rs1s,rvc_rs2s"),
+      INSN(c_lwsp, "rd,rvc_lwsp_address"),
+      INSN(c_swsp, "rvc_rs2,rvc_swsp_address"),
+      INSN(c_lw, "rvc_rs2s,rvc_lw_address"),
+      INSN(c_sw, "rvc_rs2s,rvc_lw_address"),
+      INSN(c_beqz, "rvc_rs1s,rvc_branch_target"),
+      INSN(c_bnez, "rvc_rs1s,rvc_branch_target"),
+      INSN(c_j, "rvc_jump_target"),
+    });
+    if (xlen_eq_strict(32))
+      add({INSN(c_jal, "rvc_jump_target")});
+    else
+      add({INSN(c_addiw, "rd,rvc_imm")});
 
-    if (xlen_eq(64)) {
-      DISASM_INSN("c.addw", c_addw, 0, {&rvc_rs1s, &rvc_rs2s});
-      DISASM_INSN("c.subw", c_subw, 0, {&rvc_rs1s, &rvc_rs2s});
-    }
+    if (xlen_eq(64)) add({
+      INSN(c_addw, "rvc_rs1s,rvc_rs2s"),
+      INSN(c_subw, "rvc_rs1s,rvc_rs2s"),
+    });
 
-    if (xlen_eq_strict(64) || ext_enabled_strict(EXT_ZCLSD)) {
-      DISASM_INSN("c.ld", c_ld, 0, {&rvc_rs2s, &rvc_ld_address});
-      DISASM_INSN("c.ldsp", c_ldsp, 0, {&xrd, &rvc_ldsp_address});
-      DISASM_INSN("c.sd", c_sd, 0, {&rvc_rs2s, &rvc_ld_address});
-      DISASM_INSN("c.sdsp", c_sdsp, 0, {&rvc_rs2, &rvc_sdsp_address});
-    }
+    if (xlen_eq_strict(64) || ext_enabled_strict(EXT_ZCLSD)) add({
+      INSN(c_ld, "rvc_rs2s,rvc_ld_address"),
+      INSN(c_ldsp, "rd,rvc_ldsp_address"),
+      INSN(c_sd, "rvc_rs2s,rvc_ld_address"),
+      INSN(c_sdsp, "rvc_rs2,rvc_sdsp_address"),
+    });
   }
 
-  if (ext_enabled(EXT_ZCD)) {
-    DISASM_INSN("c.fld", c_fld, 0, {&rvc_fp_rs2s, &rvc_ld_address});
-    DISASM_INSN("c.fldsp", c_fldsp, 0, {&frd, &rvc_ldsp_address});
-    DISASM_INSN("c.fsd", c_fsd, 0, {&rvc_fp_rs2s, &rvc_ld_address});
-    DISASM_INSN("c.fsdsp", c_fsdsp, 0, {&rvc_fp_rs2, &rvc_sdsp_address});
-  }
+  if (ext_enabled(EXT_ZCD)) add({
+    INSN(c_fld, "rvc_fp_rs2s,rvc_ld_address"),
+    INSN(c_fldsp, "frd,rvc_ldsp_address"),
+    INSN(c_fsd, "rvc_fp_rs2s,rvc_ld_address"),
+    INSN(c_fsdsp, "rvc_fp_rs2,rvc_sdsp_address"),
+  });
 
-  if (ext_enabled(EXT_ZCF)) {
-    DISASM_INSN("c.flw", c_flw, 0, {&rvc_fp_rs2s, &rvc_lw_address});
-    DISASM_INSN("c.flwsp", c_flwsp, 0, {&frd, &rvc_lwsp_address});
-    DISASM_INSN("c.fsw", c_fsw, 0, {&rvc_fp_rs2s, &rvc_lw_address});
-    DISASM_INSN("c.fswsp", c_fswsp, 0, {&rvc_fp_rs2, &rvc_swsp_address});
-  }
+  if (ext_enabled(EXT_ZCF)) add({
+    INSN(c_flw, "rvc_fp_rs2s,rvc_lw_address"),
+    INSN(c_flwsp, "frd,rvc_lwsp_address"),
+    INSN(c_fsw, "rvc_fp_rs2s,rvc_lw_address"),
+    INSN(c_fswsp, "rvc_fp_rs2,rvc_swsp_address"),
+  });
 
   if (ext_enabled(EXT_ZCB)) {
-    DISASM_INSN("c.zext.b", c_zext_b, 0, {&rvc_rs1s});
-    DISASM_INSN("c.sext.b", c_sext_b, 0, {&rvc_rs1s});
-    DISASM_INSN("c.zext.h", c_zext_h, 0, {&rvc_rs1s});
-    DISASM_INSN("c.sext.h", c_sext_h, 0, {&rvc_rs1s});
-    if (xlen_eq(64)) {
-      DISASM_INSN("c.zext.w", c_zext_w, 0, {&rvc_rs1s});
-    }
-    DISASM_INSN("c.not", c_not, 0, {&rvc_rs1s});
-    DISASM_INSN("c.mul", c_mul, 0, {&rvc_rs1s, &rvc_rs2s});
-    DISASM_INSN("c.lbu", c_lbu, 0, {&rvc_rs2s, &rvb_b_address});
-    DISASM_INSN("c.lhu", c_lhu, 0, {&rvc_rs2s, &rvb_h_address});
-    DISASM_INSN("c.lh", c_lh, 0, {&rvc_rs2s, &rvb_h_address});
-    DISASM_INSN("c.sb", c_sb, 0, {&rvc_rs2s, &rvb_b_address});
-    DISASM_INSN("c.sh", c_sh, 0, {&rvc_rs2s, &rvb_h_address});
+    add({
+      INSN(c_zext_b, "rvc_rs1s"),
+      INSN(c_sext_b, "rvc_rs1s"),
+      INSN(c_zext_h, "rvc_rs1s"),
+      INSN(c_sext_h, "rvc_rs1s"),
+    });
+    if (xlen_eq(64)) add({
+      INSN(c_zext_w, "rvc_rs1s"),
+    });
+    add({
+      INSN(c_not, "rvc_rs1s"),
+      INSN(c_mul, "rvc_rs1s,rvc_rs2s"),
+      INSN(c_lbu, "rvc_rs2s,rvb_b_address"),
+      INSN(c_lhu, "rvc_rs2s,rvb_h_address"),
+      INSN(c_lh, "rvc_rs2s,rvb_h_address"),
+      INSN(c_sb, "rvc_rs2s,rvb_b_address"),
+      INSN(c_sh, "rvc_rs2s,rvb_h_address"),
+    });
   }
 
   if (ext_enabled(EXT_ZCMP)) {
     if (xlen_eq_strict(32)) {
-      DISASM_INSN("cm.push", cm_push, 0, {&rvcm_pushpop_rlist, &rvcm_push_stack_adj_32});
-      DISASM_INSN("cm.pop", cm_pop, 0, {&rvcm_pushpop_rlist, &rvcm_pop_stack_adj_32});
-      DISASM_INSN("cm.popret", cm_popret, 0, {&rvcm_pushpop_rlist, &rvcm_pop_stack_adj_32});
-      DISASM_INSN("cm.popretz", cm_popretz, 0, {&rvcm_pushpop_rlist, &rvcm_pop_stack_adj_32});
+      add({
+        INSN(cm_push, "rvcm_pushpop_rlist,rvcm_push_stack_adj_32"),
+        INSN(cm_pop, "rvcm_pushpop_rlist,rvcm_pop_stack_adj_32"),
+        INSN(cm_popret, "rvcm_pushpop_rlist,rvcm_pop_stack_adj_32"),
+        INSN(cm_popretz, "rvcm_pushpop_rlist,rvcm_pop_stack_adj_32"),
+      });
     } else {
-      DISASM_INSN("cm.push", cm_push, 0, {&rvcm_pushpop_rlist, &rvcm_push_stack_adj_64});
-      DISASM_INSN("cm.pop", cm_pop, 0, {&rvcm_pushpop_rlist, &rvcm_pop_stack_adj_64});
-      DISASM_INSN("cm.popret", cm_popret, 0, {&rvcm_pushpop_rlist, &rvcm_pop_stack_adj_64});
-      DISASM_INSN("cm.popretz", cm_popretz, 0, {&rvcm_pushpop_rlist, &rvcm_pop_stack_adj_64});
+      add({
+        INSN(cm_push, "rvcm_pushpop_rlist,rvcm_push_stack_adj_64"),
+        INSN(cm_pop, "rvcm_pushpop_rlist,rvcm_pop_stack_adj_64"),
+        INSN(cm_popret, "rvcm_pushpop_rlist,rvcm_pop_stack_adj_64"),
+        INSN(cm_popretz, "rvcm_pushpop_rlist,rvcm_pop_stack_adj_64"),
+      });
     }
 
-    DISASM_INSN("cm.mva01s", cm_mva01s, 0, {&rvc_r1s, &rvc_r2s});
-    DISASM_INSN("cm.mvsa01", cm_mvsa01, 0, {&rvc_r1s, &rvc_r2s});
+    add({
+      INSN(cm_mva01s, "rvc_r1s,rvc_r2s"),
+      INSN(cm_mvsa01, "rvc_r1s,rvc_r2s"),
+    });
   }
 
-  if (ext_enabled(EXT_ZCMT)) {
-    DISASM_INSN("cm.jt", cm_jalt, 0x380, {&rvcm_jt_index});
-    DISASM_INSN("cm.jalt", cm_jalt, 0, {&rvcm_jt_index});
-  }
+  if (ext_enabled(EXT_ZCMT)) add({
+    ALIAS("cm.jt", cm_jalt, 0x380, "rvcm_jt_index"),
+    INSN(cm_jalt, "rvcm_jt_index"),
+  });
 
   if (isa->has_any_vector() || !strict) {
-    DISASM_INSN("vsetivli", vsetivli, 0, {&xrd, &zimm5, &v_vtype});
-    DISASM_INSN("vsetvli", vsetvli, 0, {&xrd, &xrs1, &v_vtype});
-    DEFINE_RTYPE(vsetvl);
+    add({
+      INSN(vsetivli, "rd,zimm5,v_vtype"),
+      INSN(vsetvli, "rd,rs1,v_vtype"),
+      INSN(vsetvl, "rd,rs1,rs2"),
+      INSN(vlm_v, "vd,(rs1),vm"),
+      INSN(vsm_v, "vs3,(rs1),vm"),
+    });
 
-    std::vector<const arg_t *> v_ld_unit = {&vd, &v_address, opt, &vm};
-    std::vector<const arg_t *> v_st_unit = {&vs3, &v_address, opt, &vm};
-    std::vector<const arg_t *> v_ld_stride = {&vd, &v_address, &xrs2, opt, &vm};
-    std::vector<const arg_t *> v_st_stride = {&vs3, &v_address, &xrs2, opt, &vm};
-    std::vector<const arg_t *> v_ld_index = {&vd, &v_address, &vs2, opt, &vm};
-    std::vector<const arg_t *> v_st_index = {&vs3, &v_address, &vs2, opt, &vm};
-
-    add_insn(new disasm_insn_t("vlm.v",  match_vlm_v,     mask_vlm_v, v_ld_unit));
-    add_insn(new disasm_insn_t("vsm.v",  match_vsm_v,     mask_vsm_v, v_st_unit));
-
-    // handle vector segment load/store
-    for (size_t elt = 0; elt <= 7; ++elt) {
-      const custom_fmt_t template_insn[] = {
-        {match_vle8_v,   mask_vle8_v,   "vl%se%d.v",   v_ld_unit},
-        {match_vse8_v,   mask_vse8_v,   "vs%se%d.v",   v_st_unit},
-
-        {match_vluxei8_v, mask_vluxei8_v, "vlux%sei%d.v", v_ld_index},
-        {match_vsuxei8_v, mask_vsuxei8_v, "vsux%sei%d.v", v_st_index},
-
-        {match_vlse8_v,  mask_vlse8_v,  "vls%se%d.v",  v_ld_stride},
-        {match_vsse8_v,  mask_vsse8_v,  "vss%se%d.v",  v_st_stride},
-
-        {match_vloxei8_v, mask_vloxei8_v, "vlox%sei%d.v", v_ld_index},
-        {match_vsoxei8_v, mask_vsoxei8_v, "vsox%sei%d.v", v_st_index},
-
-        {match_vle8ff_v, mask_vle8ff_v, "vl%se%dff.v", v_ld_unit}
-      };
-
-      reg_t elt_map[] = {0x00000000, 0x00005000, 0x00006000, 0x00007000,
-                         0x10000000, 0x10005000, 0x10006000, 0x10007000};
-
+    // Unit-stride, strided, indexed and fault-only-first loads/stores for
+    // every element width and segment count, generated from the 8-bit,
+    // nf=1 encodings.
+    const struct { uint32_t match, mask; const char *name, *fmt; } vldst[] = {
+      {match_vle8_v,    mask_vle8_v,    "vl%se%d.v",    "vd,(rs1),vm"},
+      {match_vse8_v,    mask_vse8_v,    "vs%se%d.v",    "vs3,(rs1),vm"},
+      {match_vluxei8_v, mask_vluxei8_v, "vlux%sei%d.v", "vd,(rs1),vs2,vm"},
+      {match_vsuxei8_v, mask_vsuxei8_v, "vsux%sei%d.v", "vs3,(rs1),vs2,vm"},
+      {match_vlse8_v,   mask_vlse8_v,   "vls%se%d.v",   "vd,(rs1),rs2,vm"},
+      {match_vsse8_v,   mask_vsse8_v,   "vss%se%d.v",   "vs3,(rs1),rs2,vm"},
+      {match_vloxei8_v, mask_vloxei8_v, "vlox%sei%d.v", "vd,(rs1),vs2,vm"},
+      {match_vsoxei8_v, mask_vsoxei8_v, "vsox%sei%d.v", "vs3,(rs1),vs2,vm"},
+      {match_vle8ff_v,  mask_vle8ff_v,  "vl%se%dff.v",  "vd,(rs1),vm"},
+    };
+    const uint32_t elt_map[] = {0x00000000, 0x00005000, 0x00006000, 0x00007000,
+                                0x10000000, 0x10005000, 0x10006000, 0x10007000};
+    char name[128];
+    for (unsigned elt = 0; elt <= 7; ++elt) {
       for (unsigned nf = 0; nf <= 7; ++nf) {
-        const auto seg_str = nf ? "seg" + std::to_string(nf + 1) : "";
-
-        for (auto item : template_insn) {
-          const reg_t match_nf = nf << 29;
-          char buf[128];
-          snprintf(buf, sizeof(buf), item.fmt, seg_str.c_str(), 8 << elt);
-          add_insn(new disasm_insn_t(
-            buf,
-            ((item.match | match_nf) & ~mask_vldst) | elt_map[elt],
-            item.mask | mask_nf,
-            item.arg
-            ));
+        const auto seg = nf ? "seg" + std::to_string(nf + 1) : "";
+        for (const auto& t : vldst) {
+          snprintf(name, sizeof(name), t.name, seg.c_str(), 8 << elt);
+          add_row(this, {name, ((t.match | (nf << 29)) & ~mask_vldst) | elt_map[elt], t.mask | mask_nf, t.fmt});
         }
       }
 
-      const custom_fmt_t template_insn2[] = {
-        {match_vl1re8_v,   mask_vl1re8_v,   "vl%dre%d.v",   v_ld_unit},
-      };
-
-      for (reg_t i = 0, nf = 7; i < 4; i++, nf >>= 1) {
-        for (auto item : template_insn2) {
-          const reg_t match_nf = nf << 29;
-          char buf[128];
-          snprintf(buf, sizeof(buf), item.fmt, nf + 1, 8 << elt);
-          add_insn(new disasm_insn_t(
-            buf,
-            item.match | match_nf | elt_map[elt],
-            item.mask | mask_nf,
-            item.arg
-          ));
-        }
+      // whole-register loads
+      for (unsigned nf : {7, 3, 1, 0}) {
+        snprintf(name, sizeof(name), "vl%dre%d.v", nf + 1, 8 << elt);
+        add_row(this, {name, match_vl1re8_v | (nf << 29) | elt_map[elt], mask_vl1re8_v | mask_nf, "vd,(rs1),vm"});
       }
     }
 
-    #define DISASM_ST_WHOLE_INSN(name, nf) \
-      add_insn(new disasm_insn_t(#name, match_vs1r_v | (nf << 29), \
-                                        mask_vs1r_v | mask_nf, \
-                                        {&vs3, &v_address}));
-    DISASM_ST_WHOLE_INSN(vs1r.v, 0);
-    DISASM_ST_WHOLE_INSN(vs2r.v, 1);
-    DISASM_ST_WHOLE_INSN(vs4r.v, 3);
-    DISASM_ST_WHOLE_INSN(vs8r.v, 7);
-
-    #undef DISASM_ST_WHOLE_INSN
-
-    #define DEFINE_VECTOR_V(code) add_vector_v_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_VV(code) add_vector_vv_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_MULTIPLYADD_VV(code) add_vector_multiplyadd_vv_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_VX(code) add_vector_vx_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_MULTIPLYADD_VX(code) add_vector_multiplyadd_vx_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_VF(code) add_vector_vf_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_MULTIPLYADD_VF(code) add_vector_multiplyadd_vf_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_VI(code) add_vector_vi_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_VIU(code) add_vector_viu_insn(this, #code, match_##code, mask_##code)
-    #define DEFINE_VECTOR_BDOTA(code) add_vector_bdota_insn(this, #code, match_##code, mask_##code)
-
-    #define DISASM_OPIV_VXI_INSN(name, sign, suf) \
-      DEFINE_VECTOR_VV(name##_##suf##v); \
-      DEFINE_VECTOR_VX(name##_##suf##x); \
-      if (sign) \
-        DEFINE_VECTOR_VI(name##_##suf##i); \
-      else \
-        DEFINE_VECTOR_VIU(name##_##suf##i)
-
-    #define DISASM_OPIV_VX__INSN(name, sign) \
-      DEFINE_VECTOR_VV(name##_vv); \
-      DEFINE_VECTOR_VX(name##_vx)
-
-    #define DISASM_OPIV_MULTIPLYADD_VX__INSN(name, sign) \
-      DEFINE_VECTOR_MULTIPLYADD_VV(name##_vv); \
-      DEFINE_VECTOR_MULTIPLYADD_VX(name##_vx)
-
-    #define DISASM_OPIV__XI_INSN(name, sign) \
-      DEFINE_VECTOR_VX(name##_vx); \
-      if (sign) \
-        DEFINE_VECTOR_VI(name##_vi); \
-      else \
-        DEFINE_VECTOR_VIU(name##_vi)
-
-    #define DISASM_OPIV_V___INSN(name, sign) DEFINE_VECTOR_VV(name##_vv)
-
-    #define DISASM_OPIV_S___INSN(name, sign) DEFINE_VECTOR_VV(name##_vs)
-
-    #define DISASM_OPIV_W___INSN(name, sign) \
-      DEFINE_VECTOR_VV(name##_wv); \
-      DEFINE_VECTOR_VX(name##_wx)
-
-    #define DISASM_OPIV_M___INSN(name, sign) DEFINE_VECTOR_VV(name##_mm)
-
-    #define DISASM_OPIV__X__INSN(name, sign) DEFINE_VECTOR_VX(name##_vx)
-
-    #define DISASM_OPIV_MULTIPLYADD__X__INSN(name, sign) DEFINE_VECTOR_MULTIPLYADD_VX(name##_vx)
-
-    #define DEFINE_VECTOR_VVM(name) \
-      add_vector_vvm_insn(this, #name, match_##name, mask_##name | mask_vm)
-
-    #define DEFINE_VECTOR_VXM(name) \
-      add_vector_vxm_insn(this, #name, match_##name, mask_##name | mask_vm)
-
-    #define DEFINE_VECTOR_VIM(name) \
-      add_vector_vim_insn(this, #name, match_##name, mask_##name | mask_vm)
-
-    #define DISASM_OPIV_VXIM_INSN(name) \
-      DEFINE_VECTOR_VVM(name##_vvm); \
-      DEFINE_VECTOR_VXM(name##_vxm); \
-      DEFINE_VECTOR_VIM(name##_vim)
-
-    #define DISASM_OPIV_VX_M_INSN(name) \
-      DEFINE_VECTOR_VVM(name##_vvm); \
-      DEFINE_VECTOR_VXM(name##_vxm)
+    add({
+      {"vs1r.v", match_vs1r_v | (0 << 29), mask_vs1r_v | mask_nf, "vs3,(rs1)"},
+      {"vs2r.v", match_vs1r_v | (1 << 29), mask_vs1r_v | mask_nf, "vs3,(rs1)"},
+      {"vs4r.v", match_vs1r_v | (3 << 29), mask_vs1r_v | mask_nf, "vs3,(rs1)"},
+      {"vs8r.v", match_vs1r_v | (7 << 29), mask_vs1r_v | mask_nf, "vs3,(rs1)"},
+    });
 
     //OPFVV/OPFVF
     //0b00_0000
-    DISASM_OPIV_VXI_INSN(vadd,         1, v);
-    DISASM_OPIV_VX__INSN(vsub,         1);
-    DISASM_OPIV__XI_INSN(vrsub,        1);
-    DISASM_OPIV_VX__INSN(vminu,        0);
-    DISASM_OPIV_VX__INSN(vmin,         1);
-    DISASM_OPIV_VX__INSN(vmaxu,        1);
-    DISASM_OPIV_VX__INSN(vmax,         0);
-    DISASM_OPIV_VXI_INSN(vand,         1, v);
-    DISASM_OPIV_VXI_INSN(vor,          1, v);
-    DISASM_OPIV_VXI_INSN(vxor,         1, v);
-    DISASM_OPIV_VXI_INSN(vrgather,     0, v);
-    DISASM_OPIV_V___INSN(vrgatherei16, 0);
-    DISASM_OPIV__XI_INSN(vslideup,     0);
-    DISASM_OPIV__XI_INSN(vslidedown,   0);
+    add({
+      INSN(vadd_vv, vv),
+      INSN(vadd_vx, vx),
+      INSN(vadd_vi, vi),
+      INSN(vsub_vv, vv),
+      INSN(vsub_vx, vx),
+      INSN(vrsub_vx, vx),
+      INSN(vrsub_vi, vi),
+      INSN(vminu_vv, vv),
+      INSN(vminu_vx, vx),
+      INSN(vmin_vv, vv),
+      INSN(vmin_vx, vx),
+      INSN(vmaxu_vv, vv),
+      INSN(vmaxu_vx, vx),
+      INSN(vmax_vv, vv),
+      INSN(vmax_vx, vx),
+      INSN(vand_vv, vv),
+      INSN(vand_vx, vx),
+      INSN(vand_vi, vi),
+      INSN(vor_vv, vv),
+      INSN(vor_vx, vx),
+      INSN(vor_vi, vi),
+      INSN(vxor_vv, vv),
+      INSN(vxor_vx, vx),
+      INSN(vxor_vi, vi),
+      INSN(vrgather_vv, vv),
+      INSN(vrgather_vx, vx),
+      INSN(vrgather_vi, viu),
+      INSN(vrgatherei16_vv, vv),
+      INSN(vslideup_vx, vx),
+      INSN(vslideup_vi, viu),
+      INSN(vslidedown_vx, vx),
+      INSN(vslidedown_vi, viu),
 
-    //0b01_0000
-    DISASM_OPIV_VXIM_INSN(vadc);
-    DISASM_OPIV_VX_M_INSN(vsbc);
-    DISASM_OPIV_VXIM_INSN(vmadc);
-    DISASM_OPIV_VXI_INSN(vmadc, 1, v);
-    DISASM_OPIV_VX_M_INSN(vmsbc);
-    DISASM_OPIV_VX__INSN(vmsbc, 1);
-    DISASM_OPIV_VXIM_INSN(vmerge);
-    DISASM_INSN("vmv.v.i", vmv_v_i, 0, {&vd, &v_simm5});
-    DISASM_INSN("vmv.v.v", vmv_v_v, 0, {&vd, &vs1});
-    DISASM_INSN("vmv.v.x", vmv_v_x, 0, {&vd, &xrs1});
-    DISASM_OPIV_VXI_INSN(vmseq,     1, v);
-    DISASM_OPIV_VXI_INSN(vmsne,     1, v);
-    DISASM_OPIV_VX__INSN(vmsltu,    0);
-    DISASM_OPIV_VX__INSN(vmslt,     1);
-    DISASM_OPIV_VXI_INSN(vmsleu,    0, v);
-    DISASM_OPIV_VXI_INSN(vmsle,     1, v);
-    DISASM_OPIV__XI_INSN(vmsgtu,    0);
-    DISASM_OPIV__XI_INSN(vmsgt,     1);
+      //0b01_0000
+      INSN_X(vadc_vvm, mask_vm, "vd,vs2,vs1,v0"),
+      INSN_X(vadc_vxm, mask_vm, "vd,vs2,rs1,v0"),
+      INSN_X(vadc_vim, mask_vm, "vd,vs2,v_simm5,v0"),
+      INSN_X(vsbc_vvm, mask_vm, "vd,vs2,vs1,v0"),
+      INSN_X(vsbc_vxm, mask_vm, "vd,vs2,rs1,v0"),
+      INSN_X(vmadc_vvm, mask_vm, "vd,vs2,vs1,v0"),
+      INSN_X(vmadc_vxm, mask_vm, "vd,vs2,rs1,v0"),
+      INSN_X(vmadc_vim, mask_vm, "vd,vs2,v_simm5,v0"),
+      INSN(vmadc_vv, vv),
+      INSN(vmadc_vx, vx),
+      INSN(vmadc_vi, vi),
+      INSN_X(vmsbc_vvm, mask_vm, "vd,vs2,vs1,v0"),
+      INSN_X(vmsbc_vxm, mask_vm, "vd,vs2,rs1,v0"),
+      INSN(vmsbc_vv, vv),
+      INSN(vmsbc_vx, vx),
+      INSN_X(vmerge_vvm, mask_vm, "vd,vs2,vs1,v0"),
+      INSN_X(vmerge_vxm, mask_vm, "vd,vs2,rs1,v0"),
+      INSN_X(vmerge_vim, mask_vm, "vd,vs2,v_simm5,v0"),
+      INSN(vmv_v_i, "vd,v_simm5"),
+      INSN(vmv_v_v, "vd,vs1"),
+      INSN(vmv_v_x, "vd,rs1"),
+      INSN(vmseq_vv, vv),
+      INSN(vmseq_vx, vx),
+      INSN(vmseq_vi, vi),
+      INSN(vmsne_vv, vv),
+      INSN(vmsne_vx, vx),
+      INSN(vmsne_vi, vi),
+      INSN(vmsltu_vv, vv),
+      INSN(vmsltu_vx, vx),
+      INSN(vmslt_vv, vv),
+      INSN(vmslt_vx, vx),
+      INSN(vmsleu_vv, vv),
+      INSN(vmsleu_vx, vx),
+      INSN(vmsleu_vi, viu),
+      INSN(vmsle_vv, vv),
+      INSN(vmsle_vx, vx),
+      INSN(vmsle_vi, vi),
+      INSN(vmsgtu_vx, vx),
+      INSN(vmsgtu_vi, viu),
+      INSN(vmsgt_vx, vx),
+      INSN(vmsgt_vi, vi),
 
-    //0b10_0000
-    DISASM_OPIV_VXI_INSN(vsaddu,    0, v);
-    DISASM_OPIV_VXI_INSN(vsadd,     1, v);
-    DISASM_OPIV_VX__INSN(vssubu,    0);
-    DISASM_OPIV_VX__INSN(vssub,     1);
-    DISASM_OPIV_VXI_INSN(vsll,      1, v);
-    DISASM_INSN("vmv1r.v", vmv1r_v, 0, {&vd, &vs2});
-    DISASM_INSN("vmv2r.v", vmv2r_v, 0, {&vd, &vs2});
-    DISASM_INSN("vmv4r.v", vmv4r_v, 0, {&vd, &vs2});
-    DISASM_INSN("vmv8r.v", vmv8r_v, 0, {&vd, &vs2});
-    DISASM_OPIV_VX__INSN(vsmul,     1);
-    DISASM_OPIV_VXI_INSN(vsrl,      0, v);
-    DISASM_OPIV_VXI_INSN(vsra,      0, v);
-    DISASM_OPIV_VXI_INSN(vssrl,     0, v);
-    DISASM_OPIV_VXI_INSN(vssra,     0, v);
-    DISASM_OPIV_VXI_INSN(vnsrl,     0, w);
-    DISASM_OPIV_VXI_INSN(vnsra,     0, w);
-    DISASM_OPIV_VXI_INSN(vnclipu,   0, w);
-    DISASM_OPIV_VXI_INSN(vnclip,    0, w);
+      //0b10_0000
+      INSN(vsaddu_vv, vv),
+      INSN(vsaddu_vx, vx),
+      INSN(vsaddu_vi, viu),
+      INSN(vsadd_vv, vv),
+      INSN(vsadd_vx, vx),
+      INSN(vsadd_vi, vi),
+      INSN(vssubu_vv, vv),
+      INSN(vssubu_vx, vx),
+      INSN(vssub_vv, vv),
+      INSN(vssub_vx, vx),
+      INSN(vsll_vv, vv),
+      INSN(vsll_vx, vx),
+      INSN(vsll_vi, vi),
+      INSN(vmv1r_v, "vd,vs2"),
+      INSN(vmv2r_v, "vd,vs2"),
+      INSN(vmv4r_v, "vd,vs2"),
+      INSN(vmv8r_v, "vd,vs2"),
+      INSN(vsmul_vv, vv),
+      INSN(vsmul_vx, vx),
+      INSN(vsrl_vv, vv),
+      INSN(vsrl_vx, vx),
+      INSN(vsrl_vi, viu),
+      INSN(vsra_vv, vv),
+      INSN(vsra_vx, vx),
+      INSN(vsra_vi, viu),
+      INSN(vssrl_vv, vv),
+      INSN(vssrl_vx, vx),
+      INSN(vssrl_vi, viu),
+      INSN(vssra_vv, vv),
+      INSN(vssra_vx, vx),
+      INSN(vssra_vi, viu),
+      INSN(vnsrl_wv, vv),
+      INSN(vnsrl_wx, vx),
+      INSN(vnsrl_wi, viu),
+      INSN(vnsra_wv, vv),
+      INSN(vnsra_wx, vx),
+      INSN(vnsra_wi, viu),
+      INSN(vnclipu_wv, vv),
+      INSN(vnclipu_wx, vx),
+      INSN(vnclipu_wi, viu),
+      INSN(vnclip_wv, vv),
+      INSN(vnclip_wx, vx),
+      INSN(vnclip_wi, viu),
 
-    //0b11_0000
-    DISASM_OPIV_S___INSN(vwredsumu, 0);
-    DISASM_OPIV_S___INSN(vwredsum,  1);
+      //0b11_0000
+      INSN(vwredsumu_vs, vv),
+      INSN(vwredsum_vs, vv),
 
-    //OPMVV/OPMVX
-    //0b00_0000
-    DISASM_OPIV_VX__INSN(vaaddu,    0);
-    DISASM_OPIV_VX__INSN(vaadd,     0);
-    DISASM_OPIV_VX__INSN(vasubu,    0);
-    DISASM_OPIV_VX__INSN(vasub,     0);
+      //OPMVV/OPMVX
+      //0b00_0000
+      INSN(vaaddu_vv, vv),
+      INSN(vaaddu_vx, vx),
+      INSN(vaadd_vv, vv),
+      INSN(vaadd_vx, vx),
+      INSN(vasubu_vv, vv),
+      INSN(vasubu_vx, vx),
+      INSN(vasub_vv, vv),
+      INSN(vasub_vx, vx),
 
-    DISASM_OPIV_S___INSN(vredsum,   1);
-    DISASM_OPIV_S___INSN(vredand,   1);
-    DISASM_OPIV_S___INSN(vredor,    1);
-    DISASM_OPIV_S___INSN(vredxor,   1);
-    DISASM_OPIV_S___INSN(vredminu,  0);
-    DISASM_OPIV_S___INSN(vredmin,   1);
-    DISASM_OPIV_S___INSN(vredmaxu,  0);
-    DISASM_OPIV_S___INSN(vredmax,   1);
-    DISASM_OPIV__X__INSN(vslide1up,  1);
-    DISASM_OPIV__X__INSN(vslide1down,1);
+      INSN(vredsum_vs, vv),
+      INSN(vredand_vs, vv),
+      INSN(vredor_vs, vv),
+      INSN(vredxor_vs, vv),
+      INSN(vredminu_vs, vv),
+      INSN(vredmin_vs, vv),
+      INSN(vredmaxu_vs, vv),
+      INSN(vredmax_vs, vv),
+      INSN(vslide1up_vx, vx),
+      INSN(vslide1down_vx, vx),
 
-    //0b01_0000
-    //VWXUNARY0
-    DISASM_INSN("vmv.x.s", vmv_x_s, 0, {&xrd, &vs2});
-    DISASM_INSN("vcpop.m", vcpop_m, 0, {&xrd, &vs2, opt, &vm});
-    DISASM_INSN("vfirst.m", vfirst_m, 0, {&xrd, &vs2, opt, &vm});
+      //0b01_0000
+      //VWXUNARY0
+      INSN(vmv_x_s, "rd,vs2"),
+      INSN(vcpop_m, "rd,vs2,vm"),
+      INSN(vfirst_m, "rd,vs2,vm"),
 
-    //VRXUNARY0
-    DISASM_INSN("vmv.s.x", vmv_s_x, 0, {&vd, &xrs1});
+      //VRXUNARY0
+      INSN(vmv_s_x, "vd,rs1"),
 
-    //VXUNARY0
-    DEFINE_VECTOR_V(vzext_vf2);
-    DEFINE_VECTOR_V(vsext_vf2);
-    DEFINE_VECTOR_V(vzext_vf4);
-    DEFINE_VECTOR_V(vsext_vf4);
-    DEFINE_VECTOR_V(vzext_vf8);
-    DEFINE_VECTOR_V(vsext_vf8);
+      //VXUNARY0
+      INSN(vzext_vf2, v),
+      INSN(vsext_vf2, v),
+      INSN(vzext_vf4, v),
+      INSN(vsext_vf4, v),
+      INSN(vzext_vf8, v),
+      INSN(vsext_vf8, v),
 
-    //VMUNARY0
-    DEFINE_VECTOR_V(vmsbf_m);
-    DEFINE_VECTOR_V(vmsof_m);
-    DEFINE_VECTOR_V(vmsif_m);
-    DEFINE_VECTOR_V(viota_m);
-    DISASM_INSN("vid.v", vid_v, 0, {&vd, opt, &vm});
+      //VMUNARY0
+      INSN(vmsbf_m, v),
+      INSN(vmsof_m, v),
+      INSN(vmsif_m, v),
+      INSN(viota_m, v),
+      INSN(vid_v, "vd,vm"),
 
-    DISASM_INSN("vid.v", vid_v, 0, {&vd, opt, &vm});
+      INSN(vid_v, "vd,vm"),
 
-    DISASM_INSN("vcompress.vm", vcompress_vm, 0, {&vd, &vs2, &vs1});
+      INSN(vcompress_vm, "vd,vs2,vs1"),
 
-    DISASM_OPIV_M___INSN(vmandn,    1);
-    DISASM_OPIV_M___INSN(vmand,     1);
-    DISASM_OPIV_M___INSN(vmor,      1);
-    DISASM_OPIV_M___INSN(vmxor,     1);
-    DISASM_OPIV_M___INSN(vmorn,     1);
-    DISASM_OPIV_M___INSN(vmnand,    1);
-    DISASM_OPIV_M___INSN(vmnor,     1);
-    DISASM_OPIV_M___INSN(vmxnor,    1);
+      INSN(vmandn_mm, vv),
+      INSN(vmand_mm, vv),
+      INSN(vmor_mm, vv),
+      INSN(vmxor_mm, vv),
+      INSN(vmorn_mm, vv),
+      INSN(vmnand_mm, vv),
+      INSN(vmnor_mm, vv),
+      INSN(vmxnor_mm, vv),
 
-    //0b10_0000
-    DISASM_OPIV_VX__INSN(vdivu,     0);
-    DISASM_OPIV_VX__INSN(vdiv,      1);
-    DISASM_OPIV_VX__INSN(vremu,     0);
-    DISASM_OPIV_VX__INSN(vrem,      1);
-    DISASM_OPIV_VX__INSN(vmulhu,    0);
-    DISASM_OPIV_VX__INSN(vmul,      1);
-    DISASM_OPIV_VX__INSN(vmulhsu,   0);
-    DISASM_OPIV_VX__INSN(vmulh,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vmadd,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vnmsub,    1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vmacc,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vnmsac,    1);
+      //0b10_0000
+      INSN(vdivu_vv, vv),
+      INSN(vdivu_vx, vx),
+      INSN(vdiv_vv, vv),
+      INSN(vdiv_vx, vx),
+      INSN(vremu_vv, vv),
+      INSN(vremu_vx, vx),
+      INSN(vrem_vv, vv),
+      INSN(vrem_vx, vx),
+      INSN(vmulhu_vv, vv),
+      INSN(vmulhu_vx, vx),
+      INSN(vmul_vv, vv),
+      INSN(vmul_vx, vx),
+      INSN(vmulhsu_vv, vv),
+      INSN(vmulhsu_vx, vx),
+      INSN(vmulh_vv, vv),
+      INSN(vmulh_vx, vx),
+      INSN(vmadd_vv, mvv),
+      INSN(vmadd_vx, mvx),
+      INSN(vnmsub_vv, mvv),
+      INSN(vnmsub_vx, mvx),
+      INSN(vmacc_vv, mvv),
+      INSN(vmacc_vx, mvx),
+      INSN(vnmsac_vv, mvv),
+      INSN(vnmsac_vx, mvx),
 
-    //0b11_0000
-    DISASM_OPIV_VX__INSN(vwaddu,    0);
-    DISASM_OPIV_VX__INSN(vwadd,     1);
-    DISASM_OPIV_VX__INSN(vwsubu,    0);
-    DISASM_OPIV_VX__INSN(vwsub,     1);
-    DISASM_OPIV_W___INSN(vwaddu,    0);
-    DISASM_OPIV_W___INSN(vwadd,     1);
-    DISASM_OPIV_W___INSN(vwsubu,    0);
-    DISASM_OPIV_W___INSN(vwsub,     1);
-    DISASM_OPIV_VX__INSN(vwmulu,    0);
-    DISASM_OPIV_VX__INSN(vwmulsu,   0);
-    DISASM_OPIV_VX__INSN(vwmul,     1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vwmaccu,   0);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vwmacc,    1);
-    DISASM_OPIV_MULTIPLYADD__X__INSN(vwmaccus,  1);
-    DISASM_OPIV_MULTIPLYADD_VX__INSN(vwmaccsu,  0);
+      //0b11_0000
+      INSN(vwaddu_vv, vv),
+      INSN(vwaddu_vx, vx),
+      INSN(vwadd_vv, vv),
+      INSN(vwadd_vx, vx),
+      INSN(vwsubu_vv, vv),
+      INSN(vwsubu_vx, vx),
+      INSN(vwsub_vv, vv),
+      INSN(vwsub_vx, vx),
+      INSN(vwaddu_wv, vv),
+      INSN(vwaddu_wx, vx),
+      INSN(vwadd_wv, vv),
+      INSN(vwadd_wx, vx),
+      INSN(vwsubu_wv, vv),
+      INSN(vwsubu_wx, vx),
+      INSN(vwsub_wv, vv),
+      INSN(vwsub_wx, vx),
+      INSN(vwmulu_vv, vv),
+      INSN(vwmulu_vx, vx),
+      INSN(vwmulsu_vv, vv),
+      INSN(vwmulsu_vx, vx),
+      INSN(vwmul_vv, vv),
+      INSN(vwmul_vx, vx),
+      INSN(vwmaccu_vv, mvv),
+      INSN(vwmaccu_vx, mvx),
+      INSN(vwmacc_vv, mvv),
+      INSN(vwmacc_vx, mvx),
+      INSN(vwmaccus_vx, mvx),
+      INSN(vwmaccsu_vv, mvv),
+      INSN(vwmaccsu_vx, mvx),
+    });
 
-    if (ext_enabled(EXT_ZVDOT4A)) {
-      DISASM_OPIV_VX__INSN(vdot4a,   0);
-      DISASM_OPIV_VX__INSN(vdot4au,  0);
-      DISASM_OPIV_VX__INSN(vdot4asu, 0);
-      DISASM_OPIV__X__INSN(vdot4aus, 0);
-    }
+    if (ext_enabled(EXT_ZVDOT4A)) add({
+      INSN(vdot4a_vv, vv),
+      INSN(vdot4a_vx, vx),
+      INSN(vdot4au_vv, vv),
+      INSN(vdot4au_vx, vx),
+      INSN(vdot4asu_vv, vv),
+      INSN(vdot4asu_vx, vx),
+      INSN(vdot4aus_vx, vx),
+    });
 
-    if (ext_enabled(EXT_ZVQWBDOTA8I) || ext_enabled(EXT_ZVQWBDOTA16I)) {
-      DEFINE_VECTOR_BDOTA(vqwbdotau_vv);
-      DEFINE_VECTOR_BDOTA(vqwbdotas_vv);
-    }
+    if (ext_enabled(EXT_ZVQWBDOTA8I) || ext_enabled(EXT_ZVQWBDOTA16I)) add({
+      INSN(vqwbdotau_vv, "vd,bdota_vs2,vs1,bdota_ci,vm"),
+      INSN(vqwbdotas_vv, "vd,bdota_vs2,vs1,bdota_ci,vm"),
+    });
 
-    if (ext_enabled(EXT_ZVFQWBDOTA8F)) {
-      DEFINE_VECTOR_BDOTA(vfqwbdota_vv);
-      DEFINE_VECTOR_BDOTA(vfqwbdota_alt_vv);
-    }
+    if (ext_enabled(EXT_ZVFQWBDOTA8F)) add({
+      INSN(vfqwbdota_vv, "vd,bdota_vs2,vs1,bdota_ci,vm"),
+      INSN(vfqwbdota_alt_vv, "vd,bdota_vs2,vs1,bdota_ci,vm"),
+    });
 
-    if (ext_enabled(EXT_ZVFWBDOTA16BF)) {
-      DEFINE_VECTOR_BDOTA(vfwbdota_vv);
-    }
+    if (ext_enabled(EXT_ZVFWBDOTA16BF)) add({
+      INSN(vfwbdota_vv, "vd,bdota_vs2,vs1,bdota_ci,vm"),
+    });
 
-    if (ext_enabled(EXT_ZVFBDOTA32F)) {
-      DEFINE_VECTOR_BDOTA(vfbdota_vv);
-    }
+    if (ext_enabled(EXT_ZVFBDOTA32F)) add({
+      INSN(vfbdota_vv, "vd,bdota_vs2,vs1,bdota_ci,vm"),
+    });
 
-    if (ext_enabled(EXT_ZVQWDOTA8I) || ext_enabled(EXT_ZVQWDOTA16I)) {
-      DEFINE_VECTOR_VV(vqwdotau_vv);
-      DEFINE_VECTOR_VV(vqwdotas_vv);
-    }
+    if (ext_enabled(EXT_ZVQWDOTA8I) || ext_enabled(EXT_ZVQWDOTA16I)) add({
+      INSN(vqwdotau_vv, vv),
+      INSN(vqwdotas_vv, vv),
+    });
 
-    if (ext_enabled(EXT_ZVFQWDOTA8F)) {
-      DEFINE_VECTOR_VV(vfqwdota_vv);
-      DEFINE_VECTOR_VV(vfqwdota_alt_vv);
-    }
+    if (ext_enabled(EXT_ZVFQWDOTA8F)) add({
+      INSN(vfqwdota_vv, vv),
+      INSN(vfqwdota_alt_vv, vv),
+    });
 
-    if (ext_enabled(EXT_ZVFWDOTA16BF)) {
-      DEFINE_VECTOR_VV(vfwdota_vv);
-    }
-
-    #undef DISASM_OPIV_VXI_INSN
-    #undef DISASM_OPIV_VX__INSN
-    #undef DISASM_OPIV__XI_INSN
-    #undef DISASM_OPIV_V___INSN
-    #undef DISASM_OPIV_S___INSN
-    #undef DISASM_OPIV_W___INSN
-    #undef DISASM_OPIV_M___INSN
-    #undef DISASM_OPIV__X__INSN
-    #undef DISASM_OPIV_VXIM_INSN
-    #undef DISASM_OPIV_VX_M_INSN
-
-    #define DISASM_OPIV_VF_INSN(name) \
-      DEFINE_VECTOR_VV(name##_vv); \
-      DEFINE_VECTOR_VF(name##_vf)
-
-    #define DISASM_OPIV_MULTIPLYADD_VF_INSN(name) \
-      DEFINE_VECTOR_MULTIPLYADD_VV(name##_vv); \
-      DEFINE_VECTOR_MULTIPLYADD_VF(name##_vf)
-
-    #define DISASM_OPIV_WF_INSN(name) \
-      DEFINE_VECTOR_VV(name##_wv); \
-      DEFINE_VECTOR_VF(name##_wf)
-
-    #define DISASM_OPIV_S__INSN(name) \
-      DEFINE_VECTOR_VV(name##_vs)
-
-    #define DISASM_OPIV__F_INSN(name) \
-      DEFINE_VECTOR_VF(name##_vf)
-
-    #define DISASM_VFUNARY0_INSN(name, suf) \
-      DEFINE_VECTOR_V(name##cvt_rtz_xu_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_rtz_x_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_xu_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_x_f_##suf); \
-      DEFINE_VECTOR_V(name##cvt_f_xu_##suf); \
-      DEFINE_VECTOR_V(name##cvt_f_x_##suf)
+    if (ext_enabled(EXT_ZVFWDOTA16BF)) add({
+      INSN(vfwdota_vv, vv),
+    });
 
     //OPFVV/OPFVF
     //0b00_0000
-    DISASM_OPIV_VF_INSN(vfadd);
-    DISASM_OPIV_S__INSN(vfredusum);
-    DISASM_OPIV_VF_INSN(vfsub);
-    DISASM_OPIV_S__INSN(vfredosum);
-    DISASM_OPIV_VF_INSN(vfmin);
-    DISASM_OPIV_S__INSN(vfredmin);
-    DISASM_OPIV_VF_INSN(vfmax);
-    DISASM_OPIV_S__INSN(vfredmax);
-    DISASM_OPIV_VF_INSN(vfsgnj);
-    DISASM_OPIV_VF_INSN(vfsgnjn);
-    DISASM_OPIV_VF_INSN(vfsgnjx);
-    DISASM_INSN("vfmv.f.s", vfmv_f_s, 0, {&frd, &vs2});
-    DISASM_INSN("vfmv.s.f", vfmv_s_f, mask_vfmv_s_f, {&vd, &frs1});
-    DISASM_OPIV__F_INSN(vfslide1up);
-    DISASM_OPIV__F_INSN(vfslide1down);
+    add({
+      INSN(vfadd_vv, vv),
+      INSN(vfadd_vf, vf),
+      INSN(vfredusum_vs, vv),
+      INSN(vfsub_vv, vv),
+      INSN(vfsub_vf, vf),
+      INSN(vfredosum_vs, vv),
+      INSN(vfmin_vv, vv),
+      INSN(vfmin_vf, vf),
+      INSN(vfredmin_vs, vv),
+      INSN(vfmax_vv, vv),
+      INSN(vfmax_vf, vf),
+      INSN(vfredmax_vs, vv),
+      INSN(vfsgnj_vv, vv),
+      INSN(vfsgnj_vf, vf),
+      INSN(vfsgnjn_vv, vv),
+      INSN(vfsgnjn_vf, vf),
+      INSN(vfsgnjx_vv, vv),
+      INSN(vfsgnjx_vf, vf),
+      INSN(vfmv_f_s, "frd,vs2"),
+      INSN_X(vfmv_s_f, mask_vfmv_s_f, "vd,frs1"),
+      INSN(vfslide1up_vf, vf),
+      INSN(vfslide1down_vf, vf),
 
-    //0b01_0000
-    DISASM_INSN("vfmerge.vfm", vfmerge_vfm, 0, {&vd, &vs2, &frs1, &v0});
-    DISASM_INSN("vfmv.v.f", vfmv_v_f, 0, {&vd, &frs1});
-    DISASM_OPIV_VF_INSN(vmfeq);
-    DISASM_OPIV_VF_INSN(vmfle);
-    DISASM_OPIV_VF_INSN(vmflt);
-    DISASM_OPIV_VF_INSN(vmfne);
-    DISASM_OPIV__F_INSN(vmfgt);
-    DISASM_OPIV__F_INSN(vmfge);
+      //0b01_0000
+      INSN(vfmerge_vfm, "vd,vs2,frs1,v0"),
+      INSN(vfmv_v_f, "vd,frs1"),
+      INSN(vmfeq_vv, vv),
+      INSN(vmfeq_vf, vf),
+      INSN(vmfle_vv, vv),
+      INSN(vmfle_vf, vf),
+      INSN(vmflt_vv, vv),
+      INSN(vmflt_vf, vf),
+      INSN(vmfne_vv, vv),
+      INSN(vmfne_vf, vf),
+      INSN(vmfgt_vf, vf),
+      INSN(vmfge_vf, vf),
 
-    //0b10_0000
-    DISASM_OPIV_VF_INSN(vfdiv);
-    DISASM_OPIV__F_INSN(vfrdiv);
+      //0b10_0000
+      INSN(vfdiv_vv, vv),
+      INSN(vfdiv_vf, vf),
+      INSN(vfrdiv_vf, vf),
 
-    //vfunary0
-    DISASM_VFUNARY0_INSN(vf,  v);
-    DISASM_VFUNARY0_INSN(vfw, v);
-    DEFINE_VECTOR_V(vfwcvt_f_f_v);
+      //vfunary0
+      INSN(vfcvt_rtz_xu_f_v, v),
+      INSN(vfcvt_rtz_x_f_v, v),
+      INSN(vfcvt_xu_f_v, v),
+      INSN(vfcvt_x_f_v, v),
+      INSN(vfcvt_f_xu_v, v),
+      INSN(vfcvt_f_x_v, v),
+      INSN(vfwcvt_rtz_xu_f_v, v),
+      INSN(vfwcvt_rtz_x_f_v, v),
+      INSN(vfwcvt_xu_f_v, v),
+      INSN(vfwcvt_x_f_v, v),
+      INSN(vfwcvt_f_xu_v, v),
+      INSN(vfwcvt_f_x_v, v),
+      INSN(vfwcvt_f_f_v, v),
 
-    DISASM_VFUNARY0_INSN(vfn, w);
-    DEFINE_VECTOR_V(vfncvt_f_f_w);
-    DEFINE_VECTOR_V(vfncvt_rod_f_f_w);
+      INSN(vfncvt_rtz_xu_f_w, v),
+      INSN(vfncvt_rtz_x_f_w, v),
+      INSN(vfncvt_xu_f_w, v),
+      INSN(vfncvt_x_f_w, v),
+      INSN(vfncvt_f_xu_w, v),
+      INSN(vfncvt_f_x_w, v),
+      INSN(vfncvt_f_f_w, v),
+      INSN(vfncvt_rod_f_f_w, v),
 
-    //vfunary1
-    DEFINE_VECTOR_V(vfsqrt_v);
-    DEFINE_VECTOR_V(vfrsqrt7_v);
-    DEFINE_VECTOR_V(vfrec7_v);
-    DEFINE_VECTOR_V(vfclass_v);
+      //vfunary1
+      INSN(vfsqrt_v, v),
+      INSN(vfrsqrt7_v, v),
+      INSN(vfrec7_v, v),
+      INSN(vfclass_v, v),
 
-    DISASM_OPIV_VF_INSN(vfmul);
-    DISASM_OPIV__F_INSN(vfrsub);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmadd);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmadd);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmsub);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmsub);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfmsac);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfnmsac);
+      INSN(vfmul_vv, vv),
+      INSN(vfmul_vf, vf),
+      INSN(vfrsub_vf, vf),
+      INSN(vfmadd_vv, mvv),
+      INSN(vfmadd_vf, mvf),
+      INSN(vfnmadd_vv, mvv),
+      INSN(vfnmadd_vf, mvf),
+      INSN(vfmsub_vv, mvv),
+      INSN(vfmsub_vf, mvf),
+      INSN(vfnmsub_vv, mvv),
+      INSN(vfnmsub_vf, mvf),
+      INSN(vfmacc_vv, mvv),
+      INSN(vfmacc_vf, mvf),
+      INSN(vfnmacc_vv, mvv),
+      INSN(vfnmacc_vf, mvf),
+      INSN(vfmsac_vv, mvv),
+      INSN(vfmsac_vf, mvf),
+      INSN(vfnmsac_vv, mvv),
+      INSN(vfnmsac_vf, mvf),
 
-    //0b11_0000
-    DISASM_OPIV_VF_INSN(vfwadd);
-    DISASM_OPIV_S__INSN(vfwredusum);
-    DISASM_OPIV_VF_INSN(vfwsub);
-    DISASM_OPIV_S__INSN(vfwredosum);
-    DISASM_OPIV_WF_INSN(vfwadd);
-    DISASM_OPIV_WF_INSN(vfwsub);
-    DISASM_OPIV_VF_INSN(vfwmul);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwnmacc);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwmsac);
-    DISASM_OPIV_MULTIPLYADD_VF_INSN(vfwnmsac);
-
-    #undef DISASM_OPIV_VF_INSN
-    #undef DISASM_OPIV__F_INSN
-    #undef DISASM_OPIV_S__INSN
-    #undef DISASM_OPIV_W__INSN
-    #undef DISASM_VFUNARY0_INSN
+      //0b11_0000
+      INSN(vfwadd_vv, vv),
+      INSN(vfwadd_vf, vf),
+      INSN(vfwredusum_vs, vv),
+      INSN(vfwsub_vv, vv),
+      INSN(vfwsub_vf, vf),
+      INSN(vfwredosum_vs, vv),
+      INSN(vfwadd_wv, vv),
+      INSN(vfwadd_wf, vf),
+      INSN(vfwsub_wv, vv),
+      INSN(vfwsub_wf, vf),
+      INSN(vfwmul_vv, vv),
+      INSN(vfwmul_vf, vf),
+      INSN(vfwmacc_vv, mvv),
+      INSN(vfwmacc_vf, mvf),
+      INSN(vfwnmacc_vv, mvv),
+      INSN(vfwnmacc_vf, mvf),
+      INSN(vfwmsac_vv, mvv),
+      INSN(vfwmsac_vf, mvf),
+      INSN(vfwnmsac_vv, mvv),
+      INSN(vfwnmsac_vf, mvf),
+    });
   }
 
-  if (ext_enabled(EXT_ZVFOFP4MIN)) {
-    DEFINE_VECTOR_V(vfext_vf2);
-  }
+  if (ext_enabled(EXT_ZVFOFP4MIN)) add({
+    INSN(vfext_vf2, v),
+  });
 
-  if (ext_enabled(EXT_ZVFOFP8MIN)) {
-    DEFINE_VECTOR_V(vfncvt_f_f_q);
-    DEFINE_VECTOR_V(vfncvt_sat_f_f_q);
-    DEFINE_VECTOR_V(vfncvtbf16_sat_f_f_w);
-  }
+  if (ext_enabled(EXT_ZVFOFP8MIN)) add({
+    INSN(vfncvt_f_f_q, v),
+    INSN(vfncvt_sat_f_f_q, v),
+    INSN(vfncvtbf16_sat_f_f_w, v),
+  });
 
-  if (ext_enabled(EXT_ZVFBFMIN)) {
-    DEFINE_VECTOR_V(vfncvtbf16_f_f_w);
-    DEFINE_VECTOR_V(vfwcvtbf16_f_f_v);
-  }
+  if (ext_enabled(EXT_ZVFBFMIN)) add({
+    INSN(vfncvtbf16_f_f_w, v),
+    INSN(vfwcvtbf16_f_f_v, v),
+  });
 
-  if (ext_enabled(EXT_ZVFBFWMA)) {
-    DEFINE_VECTOR_VV(vfwmaccbf16_vv);
-    DEFINE_VECTOR_VF(vfwmaccbf16_vf);
-  }
+  if (ext_enabled(EXT_ZVFBFWMA)) add({
+    INSN(vfwmaccbf16_vv, vv),
+    INSN(vfwmaccbf16_vf, vf),
+  });
 
   if (ext_enabled(EXT_ZMMUL)) {
-    DEFINE_RTYPE(mul);
-    DEFINE_RTYPE(mulh);
-    DEFINE_RTYPE(mulhu);
-    DEFINE_RTYPE(mulhsu);
+    add({
+      INSN(mul, "rd,rs1,rs2"),
+      INSN(mulh, "rd,rs1,rs2"),
+      INSN(mulhu, "rd,rs1,rs2"),
+      INSN(mulhsu, "rd,rs1,rs2"),
+    });
 
-    if (xlen_eq(64))
-      DEFINE_RTYPE(mulw);
+    if (xlen_eq(64)) add({
+      INSN(mulw, "rd,rs1,rs2"),
+    });
   }
 
-  if (ext_enabled(EXT_ZICBOM)) {
-    DISASM_INSN("cbo.clean", cbo_clean, 0, {&base_only_address});
-    DISASM_INSN("cbo.flush", cbo_flush, 0, {&base_only_address});
-    DISASM_INSN("cbo.inval", cbo_inval, 0, {&base_only_address});
-  }
+  if (ext_enabled(EXT_ZICBOM)) add({
+    INSN(cbo_clean, "(rs1)"),
+    INSN(cbo_flush, "(rs1)"),
+    INSN(cbo_inval, "(rs1)"),
+  });
 
-  if (ext_enabled(EXT_ZICBOZ)) {
-    DISASM_INSN("cbo.zero", cbo_zero, 0, {&base_only_address});
-  }
+  if (ext_enabled(EXT_ZICBOZ)) add({
+    INSN(cbo_zero, "(rs1)"),
+  });
 
-  if (ext_enabled(EXT_ZICOND)) {
-    DEFINE_RTYPE(czero_eqz);
-    DEFINE_RTYPE(czero_nez);
-  }
+  if (ext_enabled(EXT_ZICOND)) add({
+    INSN(czero_eqz, "rd,rs1,rs2"),
+    INSN(czero_nez, "rd,rs1,rs2"),
+  });
 
   if (ext_enabled(EXT_ZIMOP)) {
-    #define DISASM_MOP_R(name, rs1, rd) \
-      add_insn(new disasm_insn_t(#name, match_##name | (rs1 << 15) | (rd << 7), \
-                                        0xFFFFFFFF, {&xrd, &xrs1}));
-
-    #define DISASM_MOP_RR(name, rs1, rd, rs2) \
-      add_insn(new disasm_insn_t(#name, match_##name | (rs1 << 15) | (rd << 7) | (rs2 << 20), \
-                                        0xFFFFFFFF, {&xrd, &xrs1, &xrs2}));
-    DEFINE_R1TYPE(mop_r_0);
-    DEFINE_R1TYPE(mop_r_1);
-    DEFINE_R1TYPE(mop_r_2);
-    DEFINE_R1TYPE(mop_r_3);
-    DEFINE_R1TYPE(mop_r_4);
-    DEFINE_R1TYPE(mop_r_5);
-    DEFINE_R1TYPE(mop_r_6);
-    DEFINE_R1TYPE(mop_r_7);
-    DEFINE_R1TYPE(mop_r_8);
-    DEFINE_R1TYPE(mop_r_9);
-    DEFINE_R1TYPE(mop_r_10);
-    DEFINE_R1TYPE(mop_r_11);
-    DEFINE_R1TYPE(mop_r_12);
-    DEFINE_R1TYPE(mop_r_13);
-    DEFINE_R1TYPE(mop_r_14);
-    DEFINE_R1TYPE(mop_r_15);
-    DEFINE_R1TYPE(mop_r_16);
-    DEFINE_R1TYPE(mop_r_17);
-    DEFINE_R1TYPE(mop_r_18);
-    DEFINE_R1TYPE(mop_r_19);
-    DEFINE_R1TYPE(mop_r_20);
-    DEFINE_R1TYPE(mop_r_21);
-    DEFINE_R1TYPE(mop_r_22);
-    DEFINE_R1TYPE(mop_r_23);
-    DEFINE_R1TYPE(mop_r_24);
-    DEFINE_R1TYPE(mop_r_25);
-    DEFINE_R1TYPE(mop_r_26);
-    DEFINE_R1TYPE(mop_r_27);
+    add({
+      INSN(mop_r_0, "rd,rs1"),
+      INSN(mop_r_1, "rd,rs1"),
+      INSN(mop_r_2, "rd,rs1"),
+      INSN(mop_r_3, "rd,rs1"),
+      INSN(mop_r_4, "rd,rs1"),
+      INSN(mop_r_5, "rd,rs1"),
+      INSN(mop_r_6, "rd,rs1"),
+      INSN(mop_r_7, "rd,rs1"),
+      INSN(mop_r_8, "rd,rs1"),
+      INSN(mop_r_9, "rd,rs1"),
+      INSN(mop_r_10, "rd,rs1"),
+      INSN(mop_r_11, "rd,rs1"),
+      INSN(mop_r_12, "rd,rs1"),
+      INSN(mop_r_13, "rd,rs1"),
+      INSN(mop_r_14, "rd,rs1"),
+      INSN(mop_r_15, "rd,rs1"),
+      INSN(mop_r_16, "rd,rs1"),
+      INSN(mop_r_17, "rd,rs1"),
+      INSN(mop_r_18, "rd,rs1"),
+      INSN(mop_r_19, "rd,rs1"),
+      INSN(mop_r_20, "rd,rs1"),
+      INSN(mop_r_21, "rd,rs1"),
+      INSN(mop_r_22, "rd,rs1"),
+      INSN(mop_r_23, "rd,rs1"),
+      INSN(mop_r_24, "rd,rs1"),
+      INSN(mop_r_25, "rd,rs1"),
+      INSN(mop_r_26, "rd,rs1"),
+      INSN(mop_r_27, "rd,rs1"),
+    });
     if (!ext_enabled_strict(EXT_ZICFISS)) {
-      DEFINE_R1TYPE(mop_r_28);
+      add({INSN(mop_r_28, "rd,rs1")});
     } else {
       // Add code points of mop_r_28 not used by Zicfiss
+      const auto r1 = parse_format("rd,rs1");
       for (unsigned rd_val = 0; rd_val <= 31; ++rd_val)
         for (unsigned rs1_val = 0; rs1_val <= 31; ++rs1_val)
           if ((rd_val != 0 && rs1_val !=0) || (rd_val == 0 && !(rs1_val == 1 || rs1_val == 5)))
-            DISASM_MOP_R(mop_r_28, rs1_val, rd_val);
+            add_insn(new disasm_insn_t("mop.r.28", match_mop_r_28 | (rs1_val << 15) | (rd_val << 7), 0xffffffff, r1));
     }
-    DEFINE_R1TYPE(mop_r_29);
-    DEFINE_R1TYPE(mop_r_30);
-    DEFINE_R1TYPE(mop_r_31);
-    DEFINE_RTYPE(mop_rr_0);
-    DEFINE_RTYPE(mop_rr_1);
-    DEFINE_RTYPE(mop_rr_2);
-    DEFINE_RTYPE(mop_rr_3);
-    DEFINE_RTYPE(mop_rr_4);
-    DEFINE_RTYPE(mop_rr_5);
-    DEFINE_RTYPE(mop_rr_6);
+    add({
+      INSN(mop_r_29, "rd,rs1"),
+      INSN(mop_r_30, "rd,rs1"),
+      INSN(mop_r_31, "rd,rs1"),
+      INSN(mop_rr_0, "rd,rs1,rs2"),
+      INSN(mop_rr_1, "rd,rs1,rs2"),
+      INSN(mop_rr_2, "rd,rs1,rs2"),
+      INSN(mop_rr_3, "rd,rs1,rs2"),
+      INSN(mop_rr_4, "rd,rs1,rs2"),
+      INSN(mop_rr_5, "rd,rs1,rs2"),
+      INSN(mop_rr_6, "rd,rs1,rs2"),
+    });
     if (!ext_enabled_strict(EXT_ZICFISS)) {
-      DEFINE_RTYPE(mop_rr_7);
+      add({INSN(mop_rr_7, "rd,rs1,rs2")});
     } else {
       // Add code points of mop_rr_7 not used by Zicfiss
+      const auto rr = parse_format("rd,rs1,rs2");
       for (unsigned rd_val = 0; rd_val <= 31; ++rd_val)
         for (unsigned rs1_val = 0; rs1_val <= 31; ++rs1_val)
           for (unsigned rs2_val = 0; rs2_val <= 31; ++rs2_val)
             if ((rs2_val != 1 && rs2_val != 5) || rd_val != 0 || rs1_val != 0)
-              DISASM_MOP_RR(mop_rr_7, rs1_val, rd_val, rs2_val);
+              add_insn(new disasm_insn_t("mop.rr.7", match_mop_rr_7 | (rs1_val << 15) | (rd_val << 7) | (rs2_val << 20), 0xffffffff, rr));
     }
   }
 
   if (ext_enabled(EXT_ZCMOP)) {
+    // c.mop.1 and c.mop.5 are c.sspush/c.sspopchk under Zicfiss
     if (!ext_enabled_strict(EXT_ZICFISS))
-      DISASM_INSN("c.mop.1", c_mop_1, 0, {});
-    DISASM_INSN("c.mop.3", c_mop_3, 0, {});
+      add({INSN(c_mop_1, "")});
+    add({INSN(c_mop_3, "")});
     if (!ext_enabled_strict(EXT_ZICFISS))
-      DISASM_INSN("c.mop.5", c_mop_5, 0, {});
-    DISASM_INSN("c.mop.7", c_mop_7, 0, {});
-    DISASM_INSN("c.mop.9", c_mop_9, 0, {});
-    DISASM_INSN("c.mop.11", c_mop_11, 0, {});
-    DISASM_INSN("c.mop.13", c_mop_13, 0, {});
-    DISASM_INSN("c.mop.15", c_mop_15, 0, {});
+      add({INSN(c_mop_5, "")});
+    add({
+      INSN(c_mop_7, ""),
+      INSN(c_mop_9, ""),
+      INSN(c_mop_11, ""),
+      INSN(c_mop_13, ""),
+      INSN(c_mop_15, ""),
+    });
   }
 
-  if (ext_enabled(EXT_ZKND) || ext_enabled(EXT_ZKNE)) {
-    DISASM_INSN("aes64ks1i", aes64ks1i, 0, {&xrd, &xrs1, &rcon});
-    DEFINE_RTYPE(aes64ks2);
-  }
+  if (ext_enabled(EXT_ZKND) || ext_enabled(EXT_ZKNE)) add({
+    INSN(aes64ks1i, "rd,rs1,rcon"),
+    INSN(aes64ks2, "rd,rs1,rs2"),
+  });
 
   if (ext_enabled(EXT_ZKND)) {
-    if (xlen_eq(64)) {
-      DEFINE_RTYPE(aes64ds);
-      DEFINE_RTYPE(aes64dsm);
-      DEFINE_R1TYPE(aes64im);
-    }
+    if (xlen_eq(64)) add({
+      INSN(aes64ds, "rd,rs1,rs2"),
+      INSN(aes64dsm, "rd,rs1,rs2"),
+      INSN(aes64im, "rd,rs1"),
+    });
 
-    if (xlen_eq(32)) {
-      DISASM_INSN("aes32dsi", aes32dsi, 0, {&xrd, &xrs1, &xrs2, &bs});
-      DISASM_INSN("aes32dsmi", aes32dsmi, 0, {&xrd, &xrs1, &xrs2, &bs});
-    }
+    if (xlen_eq(32)) add({
+      INSN(aes32dsi, "rd,rs1,rs2,bs"),
+      INSN(aes32dsmi, "rd,rs1,rs2,bs"),
+    });
   }
 
   if (ext_enabled(EXT_ZKNE)) {
-    if (xlen_eq(64)) {
-      DEFINE_RTYPE(aes64es);
-      DEFINE_RTYPE(aes64esm);
-    }
+    if (xlen_eq(64)) add({
+      INSN(aes64es, "rd,rs1,rs2"),
+      INSN(aes64esm, "rd,rs1,rs2"),
+    });
 
-    if (xlen_eq(32)) {
-      DISASM_INSN("aes32esi", aes32esi, 0, {&xrd, &xrs1, &xrs2, &bs});
-      DISASM_INSN("aes32esmi", aes32esmi, 0, {&xrd, &xrs1, &xrs2, &bs});
-    }
+    if (xlen_eq(32)) add({
+      INSN(aes32esi, "rd,rs1,rs2,bs"),
+      INSN(aes32esmi, "rd,rs1,rs2,bs"),
+    });
   }
 
   if (ext_enabled(EXT_ZKNH)) {
-    DEFINE_R1TYPE(sha256sig0);
-    DEFINE_R1TYPE(sha256sig1);
-    DEFINE_R1TYPE(sha256sum0);
-    DEFINE_R1TYPE(sha256sum1);
+    add({
+      INSN(sha256sig0, "rd,rs1"),
+      INSN(sha256sig1, "rd,rs1"),
+      INSN(sha256sum0, "rd,rs1"),
+      INSN(sha256sum1, "rd,rs1"),
+    });
 
-    if (xlen_eq(64)) {
-      DEFINE_R1TYPE(sha512sig0);
-      DEFINE_R1TYPE(sha512sig1);
-      DEFINE_R1TYPE(sha512sum0);
-      DEFINE_R1TYPE(sha512sum1);
-    }
+    if (xlen_eq(64)) add({
+      INSN(sha512sig0, "rd,rs1"),
+      INSN(sha512sig1, "rd,rs1"),
+      INSN(sha512sum0, "rd,rs1"),
+      INSN(sha512sum1, "rd,rs1"),
+    });
 
-    if (xlen_eq(32)) {
-      DEFINE_RTYPE(sha512sig0h);
-      DEFINE_RTYPE(sha512sig0l);
-      DEFINE_RTYPE(sha512sig1h);
-      DEFINE_RTYPE(sha512sig1l);
-      DEFINE_RTYPE(sha512sum0r);
-      DEFINE_RTYPE(sha512sum1r);
-    }
+    if (xlen_eq(32)) add({
+      INSN(sha512sig0h, "rd,rs1,rs2"),
+      INSN(sha512sig0l, "rd,rs1,rs2"),
+      INSN(sha512sig1h, "rd,rs1,rs2"),
+      INSN(sha512sig1l, "rd,rs1,rs2"),
+      INSN(sha512sum0r, "rd,rs1,rs2"),
+      INSN(sha512sum1r, "rd,rs1,rs2"),
+    });
   }
 
-  if (ext_enabled(EXT_ZKSED)) {
-    DISASM_INSN("sm4ed", sm4ed, 0, {&xrd, &xrs1, &xrs2, &bs});
-    DISASM_INSN("sm4ks", sm4ks, 0, {&xrd, &xrs1, &xrs2, &bs});
-  }
+  if (ext_enabled(EXT_ZKSED)) add({
+    INSN(sm4ed, "rd,rs1,rs2,bs"),
+    INSN(sm4ks, "rd,rs1,rs2,bs"),
+  });
 
-  if (ext_enabled(EXT_ZKSH)) {
-    DEFINE_R1TYPE(sm3p0);
-    DEFINE_R1TYPE(sm3p1);
-  }
+  if (ext_enabled(EXT_ZKSH)) add({
+    INSN(sm3p0, "rd,rs1"),
+    INSN(sm3p1, "rd,rs1"),
+  });
 
-  if (ext_enabled(EXT_ZVABD)) {
-    DEFINE_VECTOR_VV(vabd_vv);
-    DEFINE_VECTOR_VX(vabd_vx);
-    DEFINE_VECTOR_VV(vabdu_vv);
-    DEFINE_VECTOR_VX(vabdu_vx);
-    DEFINE_VECTOR_VV(vwabda_vv);
-    DEFINE_VECTOR_VX(vwabda_vx);
-    DEFINE_VECTOR_VV(vwabdau_vv);
-    DEFINE_VECTOR_VX(vwabdau_vx);
-  }
+  if (ext_enabled(EXT_ZVABD)) add({
+    INSN(vabd_vv, vv),
+    INSN(vabd_vx, vx),
+    INSN(vabdu_vv, vv),
+    INSN(vabdu_vx, vx),
+    INSN(vwabda_vv, vv),
+    INSN(vwabda_vx, vx),
+    INSN(vwabdau_vv, vv),
+    INSN(vwabdau_vx, vx),
+  });
 
-  if (ext_enabled(EXT_ZVZIP)) {
-    DEFINE_VECTOR_VV(vzip_vv);
-    DEFINE_VECTOR_V(vunzipe_v);
-    DEFINE_VECTOR_V(vunzipo_v);
-    DEFINE_VECTOR_VV(vpaire_vv);
-    DEFINE_VECTOR_VV(vpairo_vv);
-  }
+  if (ext_enabled(EXT_ZVZIP)) add({
+    INSN(vzip_vv, vv),
+    INSN(vunzipe_v, v),
+    INSN(vunzipo_v, v),
+    INSN(vpaire_vv, vv),
+    INSN(vpairo_vv, vv),
+  });
 
   if (ext_enabled(EXT_ZVBB)) {
-#define DEFINE_VECTOR_VIU_ZIMM6(code) \
-  add_vector_viu_z6_insn(this, #code, match_##code, mask_##code)
-#define DISASM_VECTOR_VV_VX(name) \
-  DEFINE_VECTOR_VV(name##_vv); \
-  DEFINE_VECTOR_VX(name##_vx)
-#define DISASM_VECTOR_VV_VX_VIU(name) \
-  DEFINE_VECTOR_VV(name##_vv); \
-  DEFINE_VECTOR_VX(name##_vx); \
-  DEFINE_VECTOR_VIU(name##_vi)
-#define DISASM_VECTOR_VV_VX_VIU_ZIMM6(name) \
-  DEFINE_VECTOR_VV(name##_vv); \
-  DEFINE_VECTOR_VX(name##_vx); \
-  DEFINE_VECTOR_VIU_ZIMM6(name##_vi)
-
-    DISASM_VECTOR_VV_VX(vandn);
-    DEFINE_VECTOR_V(vbrev_v);
-    DEFINE_VECTOR_V(vbrev8_v);
-    DEFINE_VECTOR_V(vrev8_v);
-    DEFINE_VECTOR_V(vclz_v);
-    DEFINE_VECTOR_V(vctz_v);
-    DEFINE_VECTOR_V(vcpop_v);
-    DISASM_VECTOR_VV_VX(vrol);
-    DISASM_VECTOR_VV_VX_VIU_ZIMM6(vror);
-    DISASM_VECTOR_VV_VX_VIU(vwsll);
-
-#undef DEFINE_VECTOR_VIU_ZIMM6
-#undef DISASM_VECTOR_VV_VX
-#undef DISASM_VECTOR_VV_VX_VIU
-#undef DISASM_VECTOR_VV_VX_VIU_ZIMM6
-    }
-
-  if (ext_enabled(EXT_ZVBC)) {
-#define DISASM_VECTOR_VV_VX(name) \
-    DEFINE_VECTOR_VV(name##_vv); \
-    DEFINE_VECTOR_VX(name##_vx)
-
-    DISASM_VECTOR_VV_VX(vclmul);
-    DISASM_VECTOR_VV_VX(vclmulh);
-
-#undef DISASM_VECTOR_VV_VX
+    add({
+      INSN(vandn_vv, vv),
+      INSN(vandn_vx, vx),
+      INSN(vbrev_v, v),
+      INSN(vbrev8_v, v),
+      INSN(vrev8_v, v),
+      INSN(vclz_v, v),
+      INSN(vctz_v, v),
+      INSN(vcpop_v, v),
+      INSN(vrol_vv, vv),
+      INSN(vrol_vx, vx),
+      INSN(vror_vv, vv),
+      INSN(vror_vx, vx),
+      INSN(vror_vi, "vd,vs2,v_zimm6,vm"),
+      INSN(vwsll_vv, vv),
+      INSN(vwsll_vx, vx),
+      INSN(vwsll_vi, viu),
+    });
   }
 
-  if (ext_enabled(EXT_ZVKG)) {
+  if (ext_enabled(EXT_ZVBC)) add({
+    INSN(vclmul_vv, vv),
+    INSN(vclmul_vx, vx),
+    INSN(vclmulh_vv, vv),
+    INSN(vclmulh_vx, vx),
+  });
+
+  if (ext_enabled(EXT_ZVKG)) add({
     // Despite its suffix, the vgmul.vv instruction
     // is really ".v", with the form "vgmul.vv vd, vs2".
-    DEFINE_VECTOR_V(vgmul_vv);
-    DEFINE_VECTOR_VV(vghsh_vv);
-  }
+    INSN(vgmul_vv, v),
+    INSN(vghsh_vv, vv),
+  });
 
-  if (ext_enabled(EXT_ZVKNED)) {
+  if (ext_enabled(EXT_ZVKNED)) add({
     // Despite their suffixes, the vaes*.{vv,vs} instructions
     // are really ".v", with the form "<op>.{vv,vs} vd, vs2".
-#define DISASM_VECTOR_VV_VS(name) \
-    DEFINE_VECTOR_V(name##_vv); \
-    DEFINE_VECTOR_V(name##_vs)
+    INSN(vaesdm_vv, v),
+    INSN(vaesdm_vs, v),
+    INSN(vaesdf_vv, v),
+    INSN(vaesdf_vs, v),
+    INSN(vaesem_vv, v),
+    INSN(vaesem_vs, v),
+    INSN(vaesef_vv, v),
+    INSN(vaesef_vs, v),
 
-    DISASM_VECTOR_VV_VS(vaesdm);
-    DISASM_VECTOR_VV_VS(vaesdf);
-    DISASM_VECTOR_VV_VS(vaesem);
-    DISASM_VECTOR_VV_VS(vaesef);
+    INSN(vaesz_vs, v),
+    INSN(vaeskf1_vi, viu),
+    INSN(vaeskf2_vi, viu),
+  });
 
-    DEFINE_VECTOR_V(vaesz_vs);
-    DEFINE_VECTOR_VIU(vaeskf1_vi);
-    DEFINE_VECTOR_VIU(vaeskf2_vi);
-#undef DISASM_VECTOR_VV_VS
-  }
+  if (ext_enabled(EXT_ZVKNHA) || ext_enabled(EXT_ZVKNHB)) add({
+    INSN(vsha2ms_vv, vv),
+    INSN(vsha2ch_vv, vv),
+    INSN(vsha2cl_vv, vv),
+  });
 
-  if (ext_enabled(EXT_ZVKNHA) || ext_enabled(EXT_ZVKNHB)) {
-    DEFINE_VECTOR_VV(vsha2ms_vv);
-    DEFINE_VECTOR_VV(vsha2ch_vv);
-    DEFINE_VECTOR_VV(vsha2cl_vv);
-  }
-
-  if (ext_enabled(EXT_ZVKSED)) {
-    DEFINE_VECTOR_VIU(vsm4k_vi);
+  if (ext_enabled(EXT_ZVKSED)) add({
+    INSN(vsm4k_vi, viu),
     // Despite their suffixes, the vsm4r.{vv,vs} instructions
     // are really ".v", with the form "vsm4r.{vv,vs} vd, vs2".
-    DEFINE_VECTOR_V(vsm4r_vv);
-    DEFINE_VECTOR_V(vsm4r_vs);
-  }
+    INSN(vsm4r_vv, v),
+    INSN(vsm4r_vs, v),
+  });
 
-  if (ext_enabled(EXT_ZVKSH)) {
-    DEFINE_VECTOR_VIU(vsm3c_vi);
-    DEFINE_VECTOR_VV(vsm3me_vv);
-  }
+  if (ext_enabled(EXT_ZVKSH)) add({
+    INSN(vsm3c_vi, viu),
+    INSN(vsm3me_vv, vv),
+  });
 
-  if (ext_enabled(EXT_ZALASR)) {
-    DEFINE_XLOAD_BASE(lb_aq);
-    DEFINE_XLOAD_BASE(lh_aq);
-    DEFINE_XLOAD_BASE(lw_aq);
-    DEFINE_XLOAD_BASE(ld_aq);
-    DEFINE_XSTORE_BASE(sb_rl);
-    DEFINE_XSTORE_BASE(sh_rl);
-    DEFINE_XSTORE_BASE(sw_rl);
-    DEFINE_XSTORE_BASE(sd_rl);
-  }
+  if (ext_enabled(EXT_ZALASR)) add({
+    INSN(lb_aq, "rd,(rs1)"),
+    INSN(lh_aq, "rd,(rs1)"),
+    INSN(lw_aq, "rd,(rs1)"),
+    INSN(ld_aq, "rd,(rs1)"),
+    INSN(sb_rl, "rs2,(rs1)"),
+    INSN(sh_rl, "rs2,(rs1)"),
+    INSN(sw_rl, "rs2,(rs1)"),
+    INSN(sd_rl, "rs2,(rs1)"),
+  });
 
   if (ext_enabled(EXT_ZICFISS)) {
-    DISASM_INSN("sspush", sspush_x1, 0, {&xrs2});
-    DISASM_INSN("sspush", sspush_x5, 0, {&xrs2});
-    DISASM_INSN("sspopchk", sspopchk_x1, 0, {&xrs1});
-    DISASM_INSN("sspopchk", sspopchk_x5, 0, {&xrs1});
-    DISASM_INSN("ssrdp", ssrdp, 0, {&xrd});
-    DEFINE_XAMO(ssamoswap_w);
+    add({
+      ALIAS("sspush", sspush_x1, 0, "rs2"),
+      ALIAS("sspush", sspush_x5, 0, "rs2"),
+      ALIAS("sspopchk", sspopchk_x1, 0, "rs1"),
+      ALIAS("sspopchk", sspopchk_x5, 0, "rs1"),
+      INSN(ssrdp, "rd"),
+      AMO(ssamoswap_w),
+    });
 
-    if (xlen_eq(64))
-      DEFINE_XAMO(ssamoswap_d)
+    if (xlen_eq(64)) add({
+      AMO(ssamoswap_d),
+    });
 
-    if (ext_enabled(EXT_ZCA)) {
-      DISASM_INSN("c.sspush", c_sspush_x1, 0, {&rvc_ra});
-      DISASM_INSN("c.sspopchk", c_sspopchk_x5, 0, {&rvc_t0});
-    }
+    if (ext_enabled(EXT_ZCA)) add({
+      ALIAS("c.sspush", c_sspush_x1, 0, "rvc_ra"),
+      ALIAS("c.sspopchk", c_sspopchk_x5, 0, "rvc_t0"),
+    });
   }
 
   // P-extension (Packed SIMD) instructions
   if (ext_enabled('P')) {
     // R-type instructions (rd, rs1, rs2) - RV32 only (share opcode with RV64 packed-word)
-    if (xlen_eq(32)) {
-      DEFINE_RTYPE(aadd);
-      DEFINE_RTYPE(aaddu);
-      DEFINE_RTYPE(asub);
-      DEFINE_RTYPE(asubu);
-      DEFINE_RTYPE(mseq);
-      DEFINE_RTYPE(mslt);
-      DEFINE_RTYPE(msltu);
-    }
+    if (xlen_eq(32)) add({
+      INSN(aadd, "rd,rs1,rs2"),
+      INSN(aaddu, "rd,rs1,rs2"),
+      INSN(asub, "rd,rs1,rs2"),
+      INSN(asubu, "rd,rs1,rs2"),
+      INSN(mseq, "rd,rs1,rs2"),
+      INSN(mslt, "rd,rs1,rs2"),
+      INSN(msltu, "rd,rs1,rs2"),
+    });
     // RV32/RV64 common instructions
-    DEFINE_RTYPE_PAIR(addd);
-    DEFINE_RTYPE_PAIR(subd);
-    DEFINE_RTYPE(merge);
-    DEFINE_RTYPE(mvm);
-    DEFINE_RTYPE(mvmn);
-    // Type 2: rs1p - Narrowing instructions (rd normal, rs1p is pair, rs2 normal/scalar)
-    DEFINE_RTYPE_RS1P(nclip);
-    DEFINE_RTYPE_RS1P(nclipr);
-    DEFINE_RTYPE_RS1P(nclipu);
-    DEFINE_RTYPE_RS1P(nclipru);
-    DEFINE_RTYPE_RS1P(nsra);
-    DEFINE_RTYPE_RS1P(nsrar);
-    DEFINE_RTYPE_RS1P(nsrl);
+    add({
+      INSN(addd, "rdp,rs1p,rs2p"),
+      INSN(subd, "rdp,rs1p,rs2p"),
+      INSN(merge, "rd,rs1,rs2"),
+      INSN(mvm, "rd,rs1,rs2"),
+      INSN(mvmn, "rd,rs1,rs2"),
+      // Type 2: rs1p - Narrowing instructions (rd normal, rs1p is pair, rs2 normal/scalar)
+      INSN(nclip, "rd,rs1p,rs2"),
+      INSN(nclipr, "rd,rs1p,rs2"),
+      INSN(nclipu, "rd,rs1p,rs2"),
+      INSN(nclipru, "rd,rs1p,rs2"),
+      INSN(nsra, "rd,rs1p,rs2"),
+      INSN(nsrar, "rd,rs1p,rs2"),
+      INSN(nsrl, "rd,rs1p,rs2"),
+    });
     // RV32-only instructions (share opcode with RV64 packed-word)
-    if (xlen_eq(32)) {
-      DEFINE_RTYPE(sadd);
-      DEFINE_RTYPE(saddu);
-      DEFINE_RTYPE(ssub);
-      DEFINE_RTYPE(ssubu);
-      DEFINE_RTYPE(ssh1sadd);
-      DEFINE_RTYPE(ssha);
-      DEFINE_RTYPE(sshar);
-      DEFINE_RTYPE(sshl);
-      DEFINE_RTYPE(sshlr);
-    }
-    DEFINE_RTYPE_PAIR(sha);
-    DEFINE_RTYPE_PAIR(shar);
-    DEFINE_RTYPE(slx);
-    DEFINE_RTYPE(srx);
-    // Type 1: rdp - Widening instructions (rdp is pair, rs1/rs2 normal)
-    DEFINE_RTYPE_RDP(wadd);
-    DEFINE_RTYPE_RDP(wadda);
-    DEFINE_RTYPE_RDP(waddu);
-    DEFINE_RTYPE_RDP(waddau);
-    DEFINE_RTYPE_RDP(wsub);
-    DEFINE_RTYPE_RDP(wsuba);
-    DEFINE_RTYPE_RDP(wsubu);
-    DEFINE_RTYPE_RDP(wsubau);
-    DEFINE_RTYPE_RDP(wsll);
-    DEFINE_RTYPE_RDP(wsla);
-    DEFINE_RTYPE_RDP(wmul);
-    DEFINE_RTYPE_RDP(wmulu);
-    DEFINE_RTYPE_RDP(wmulsu);
-    DEFINE_RTYPE_RDP(wmacc);
-    DEFINE_RTYPE_RDP(wmaccu);
-    DEFINE_RTYPE_RDP(wmaccsu);
+    if (xlen_eq(32)) add({
+      INSN(sadd, "rd,rs1,rs2"),
+      INSN(saddu, "rd,rs1,rs2"),
+      INSN(ssub, "rd,rs1,rs2"),
+      INSN(ssubu, "rd,rs1,rs2"),
+      INSN(ssh1sadd, "rd,rs1,rs2"),
+      INSN(ssha, "rd,rs1,rs2"),
+      INSN(sshar, "rd,rs1,rs2"),
+      INSN(sshl, "rd,rs1,rs2"),
+      INSN(sshlr, "rd,rs1,rs2"),
+    });
+    add({
+      INSN(sha, "rdp,rs1p,rs2p"),
+      INSN(shar, "rdp,rs1p,rs2p"),
+      INSN(slx, "rd,rs1,rs2"),
+      INSN(srx, "rd,rs1,rs2"),
+      // Type 1: rdp - Widening instructions (rdp is pair, rs1/rs2 normal)
+      INSN(wadd, "rdp,rs1,rs2"),
+      INSN(wadda, "rdp,rs1,rs2"),
+      INSN(waddu, "rdp,rs1,rs2"),
+      INSN(waddau, "rdp,rs1,rs2"),
+      INSN(wsub, "rdp,rs1,rs2"),
+      INSN(wsuba, "rdp,rs1,rs2"),
+      INSN(wsubu, "rdp,rs1,rs2"),
+      INSN(wsubau, "rdp,rs1,rs2"),
+      INSN(wsll, "rdp,rs1,rs2"),
+      INSN(wsla, "rdp,rs1,rs2"),
+      INSN(wmul, "rdp,rs1,rs2"),
+      INSN(wmulu, "rdp,rs1,rs2"),
+      INSN(wmulsu, "rdp,rs1,rs2"),
+      INSN(wmacc, "rdp,rs1,rs2"),
+      INSN(wmaccu, "rdp,rs1,rs2"),
+      INSN(wmaccsu, "rdp,rs1,rs2"),
+    });
 
     // R-type mac/mul instructions with element selection (RV32 only - share opcode with RV64 packed-word)
-    if (xlen_eq(32)) {
-      DEFINE_RTYPE(macc_h00);
-      DEFINE_RTYPE(macc_h01);
-      DEFINE_RTYPE(macc_h11);
-      DEFINE_RTYPE(maccu_h00);
-      DEFINE_RTYPE(maccu_h01);
-      DEFINE_RTYPE(maccu_h11);
-      DEFINE_RTYPE(maccsu_h00);
-      DEFINE_RTYPE(maccsu_h11);
-      DEFINE_RTYPE(mul_h00);
-      DEFINE_RTYPE(mul_h01);
-      DEFINE_RTYPE(mul_h11);
-      DEFINE_RTYPE(mulu_h00);
-      DEFINE_RTYPE(mulu_h01);
-      DEFINE_RTYPE(mulu_h11);
-      DEFINE_RTYPE(mulsu_h00);
-      DEFINE_RTYPE(mulsu_h11);
-      DEFINE_RTYPE(mulh_h0);
-      DEFINE_RTYPE(mulh_h1);
-      DEFINE_RTYPE(mulhsu_h0);
-      DEFINE_RTYPE(mulhsu_h1);
-      DEFINE_RTYPE(mulhr);
-      DEFINE_RTYPE(mulhru);
-      DEFINE_RTYPE(mulhrsu);
-      DEFINE_RTYPE(mulq);
-      DEFINE_RTYPE(mulqr);
-      DEFINE_RTYPE(mhacc);
-      DEFINE_RTYPE(mhaccu);
-      DEFINE_RTYPE(mhaccsu);
-      DEFINE_RTYPE(mhacc_h0);
-      DEFINE_RTYPE(mhacc_h1);
-      DEFINE_RTYPE(mhaccsu_h0);
-      DEFINE_RTYPE(mhaccsu_h1);
-      DEFINE_RTYPE(mhracc);
-      DEFINE_RTYPE(mhraccu);
-      DEFINE_RTYPE(mhraccsu);
-    }
-    DEFINE_RTYPE(mqacc_h00);
-    DEFINE_RTYPE(mqacc_h01);
-    DEFINE_RTYPE(mqacc_h11);
-    DEFINE_RTYPE(mqracc_h00);
-    DEFINE_RTYPE(mqracc_h01);
-    DEFINE_RTYPE(mqracc_h11);
+    if (xlen_eq(32)) add({
+      INSN(macc_h00, "rd,rs1,rs2"),
+      INSN(macc_h01, "rd,rs1,rs2"),
+      INSN(macc_h11, "rd,rs1,rs2"),
+      INSN(maccu_h00, "rd,rs1,rs2"),
+      INSN(maccu_h01, "rd,rs1,rs2"),
+      INSN(maccu_h11, "rd,rs1,rs2"),
+      INSN(maccsu_h00, "rd,rs1,rs2"),
+      INSN(maccsu_h11, "rd,rs1,rs2"),
+      INSN(mul_h00, "rd,rs1,rs2"),
+      INSN(mul_h01, "rd,rs1,rs2"),
+      INSN(mul_h11, "rd,rs1,rs2"),
+      INSN(mulu_h00, "rd,rs1,rs2"),
+      INSN(mulu_h01, "rd,rs1,rs2"),
+      INSN(mulu_h11, "rd,rs1,rs2"),
+      INSN(mulsu_h00, "rd,rs1,rs2"),
+      INSN(mulsu_h11, "rd,rs1,rs2"),
+      INSN(mulh_h0, "rd,rs1,rs2"),
+      INSN(mulh_h1, "rd,rs1,rs2"),
+      INSN(mulhsu_h0, "rd,rs1,rs2"),
+      INSN(mulhsu_h1, "rd,rs1,rs2"),
+      INSN(mulhr, "rd,rs1,rs2"),
+      INSN(mulhru, "rd,rs1,rs2"),
+      INSN(mulhrsu, "rd,rs1,rs2"),
+      INSN(mulq, "rd,rs1,rs2"),
+      INSN(mulqr, "rd,rs1,rs2"),
+      INSN(mhacc, "rd,rs1,rs2"),
+      INSN(mhaccu, "rd,rs1,rs2"),
+      INSN(mhaccsu, "rd,rs1,rs2"),
+      INSN(mhacc_h0, "rd,rs1,rs2"),
+      INSN(mhacc_h1, "rd,rs1,rs2"),
+      INSN(mhaccsu_h0, "rd,rs1,rs2"),
+      INSN(mhaccsu_h1, "rd,rs1,rs2"),
+      INSN(mhracc, "rd,rs1,rs2"),
+      INSN(mhraccu, "rd,rs1,rs2"),
+      INSN(mhraccsu, "rd,rs1,rs2"),
+    });
+    add({
+      INSN(mqacc_h00, "rd,rs1,rs2"),
+      INSN(mqacc_h01, "rd,rs1,rs2"),
+      INSN(mqacc_h11, "rd,rs1,rs2"),
+      INSN(mqracc_h00, "rd,rs1,rs2"),
+      INSN(mqracc_h01, "rd,rs1,rs2"),
+      INSN(mqracc_h11, "rd,rs1,rs2"),
 
-    // R1-type instructions (rd, rs1) - unary ops
-    DEFINE_R1TYPE(abs);
-    DEFINE_R1TYPE(cls);
+      // R1-type instructions (rd, rs1) - unary ops
+      INSN(abs, "rd,rs1"),
+      INSN(cls, "rd,rs1"),
 
-    // I-type shift instructions (rd, rs1, shamt)
-    DISASM_INSN("nclipi", nclipi, 0, {&xrd, &xrs1, &shamtd});
-    DISASM_INSN("nclipiu", nclipiu, 0, {&xrd, &xrs1, &shamtd});
-    DISASM_INSN("nclipri", nclipri, 0, {&xrd, &xrs1, &shamtd});
-    DISASM_INSN("nclipriu", nclipriu, 0, {&xrd, &xrs1, &shamtd});
-    DISASM_INSN("nsrai", nsrai, 0, {&xrd, &xrs1, &shamtd});
-    DISASM_INSN("nsrari", nsrari, 0, {&xrd, &xrs1, &shamtd});
-    DISASM_INSN("nsrli", nsrli, 0, {&xrd, &xrs1, &shamtd});
+      // I-type shift instructions (rd, rs1, shamt)
+      INSN(nclipi, "rd,rs1,shamtd"),
+      INSN(nclipiu, "rd,rs1,shamtd"),
+      INSN(nclipri, "rd,rs1,shamtd"),
+      INSN(nclipriu, "rd,rs1,shamtd"),
+      INSN(nsrai, "rd,rs1,shamtd"),
+      INSN(nsrari, "rd,rs1,shamtd"),
+      INSN(nsrli, "rd,rs1,shamtd"),
+    });
     // sslai shares opcode with psslai_w on RV64
-    if (xlen_eq(32)) {
-      DISASM_INSN("sslai", sslai, 0, {&xrd, &xrs1, &shamt});
-    }
-    DISASM_INSN("wslli", wslli, 0, {&xrd, &xrs1, &shamt});
-    DISASM_INSN("wslai", wslai, 0, {&xrd, &xrs1, &shamt});
+    if (xlen_eq(32)) add({
+      INSN(sslai, "rd,rs1,shamt"),
+    });
+    add({
+      INSN(wslli, "rd,rs1,shamt"),
+      INSN(wslai, "rd,rs1,shamt"),
+    });
     if (xlen_eq(64)) {
-      DISASM_INSN("sati", sati, 0, {&xrd, &xrs1, &shamt});
-      DISASM_INSN("usati", usati, 0, {&xrd, &xrs1, &shamt});
-      DISASM_INSN("srari", srari, 0, {&xrd, &xrs1, &shamt});
+      add({
+        INSN(sati, "rd,rs1,shamt"),
+        INSN(usati, "rd,rs1,shamt"),
+        INSN(srari, "rd,rs1,shamt"),
+      });
     } else {
-      DISASM_INSN("sati", sati_rv32, 0, {&xrd, &xrs1, &shamt});
-      DISASM_INSN("usati", usati_rv32, 0, {&xrd, &xrs1, &shamt});
-      DISASM_INSN("srari", srari_rv32, 0, {&xrd, &xrs1, &shamt});
+      add({
+        ALIAS("sati", sati_rv32, 0, "rd,rs1,shamt"),
+        ALIAS("usati", usati_rv32, 0, "rd,rs1,shamt"),
+        ALIAS("srari", srari_rv32, 0, "rd,rs1,shamt"),
+      });
     }
 
     // Packed R-type instructions (rd, rs1, rs2) - RV32/RV64 common
-    DEFINE_RTYPE(paadd_b);
-    DEFINE_RTYPE(paadd_h);
-    // Type 4: rdp + rs1p + rs2p - Doubleword pair-to-pair ops
-    DEFINE_RTYPE_PAIR(paadd_db);
-    DEFINE_RTYPE_PAIR(paadd_dh);
-    DEFINE_RTYPE_PAIR(paadd_dw);
-    DEFINE_RTYPE(paaddu_b);
-    DEFINE_RTYPE(paaddu_h);
-    DEFINE_RTYPE_PAIR(paaddu_db);
-    DEFINE_RTYPE_PAIR(paaddu_dh);
-    DEFINE_RTYPE_PAIR(paaddu_dw);
-    DEFINE_RTYPE(paas_hx);
-    DEFINE_RTYPE_PAIR(paas_dhx);
-    DEFINE_RTYPE(pabd_b);
-    DEFINE_RTYPE(pabd_h);
-    DEFINE_RTYPE_PAIR(pabd_db);
-    DEFINE_RTYPE_PAIR(pabd_dh);
-    DEFINE_RTYPE(pabdu_b);
-    DEFINE_RTYPE(pabdu_h);
-    DEFINE_RTYPE_PAIR(pabdu_db);
-    DEFINE_RTYPE_PAIR(pabdu_dh);
-    DEFINE_RTYPE(pabdsumu_b);
-    DEFINE_RTYPE(pabdsumau_b);
-    DEFINE_RTYPE(padd_b);
-    DEFINE_RTYPE(padd_h);
-    DEFINE_RTYPE(padd_bs);
-    DEFINE_RTYPE(padd_hs);
-    DEFINE_RTYPE_PAIR(padd_db);
-    DEFINE_RTYPE_PAIR(padd_dh);
-    DEFINE_RTYPE_PAIR(padd_dw);
-    // Type 3: rdp + rs1p - Doubleword with scalar rs2
-    DEFINE_RTYPE_RDP_RS1P(padd_dbs);
-    DEFINE_RTYPE_RDP_RS1P(padd_dhs);
-    DEFINE_RTYPE_RDP_RS1P(padd_dws);
-    DEFINE_RTYPE(pasub_b);
-    DEFINE_RTYPE(pasub_h);
-    DEFINE_RTYPE_PAIR(pasub_db);
-    DEFINE_RTYPE_PAIR(pasub_dh);
-    DEFINE_RTYPE_PAIR(pasub_dw);
-    DEFINE_RTYPE(pasubu_b);
-    DEFINE_RTYPE(pasubu_h);
-    DEFINE_RTYPE_PAIR(pasubu_db);
-    DEFINE_RTYPE_PAIR(pasubu_dh);
-    DEFINE_RTYPE_PAIR(pasubu_dw);
-    DEFINE_RTYPE(pasa_hx);
-    DEFINE_RTYPE_PAIR(pasa_dhx);
-    DEFINE_RTYPE(pas_hx);
-    DEFINE_RTYPE_PAIR(pas_dhx);
-    DEFINE_RTYPE(psadd_b);
-    DEFINE_RTYPE(psadd_h);
-    DEFINE_RTYPE_PAIR(psadd_db);
-    DEFINE_RTYPE_PAIR(psadd_dh);
-    DEFINE_RTYPE_PAIR(psadd_dw);
-    DEFINE_RTYPE(psaddu_b);
-    DEFINE_RTYPE(psaddu_h);
-    DEFINE_RTYPE_PAIR(psaddu_db);
-    DEFINE_RTYPE_PAIR(psaddu_dh);
-    DEFINE_RTYPE_PAIR(psaddu_dw);
-    DEFINE_RTYPE(psub_b);
-    DEFINE_RTYPE(psub_h);
-    DEFINE_RTYPE_PAIR(psub_db);
-    DEFINE_RTYPE_PAIR(psub_dh);
-    DEFINE_RTYPE_PAIR(psub_dw);
-    DEFINE_RTYPE(pssub_b);
-    DEFINE_RTYPE(pssub_h);
-    DEFINE_RTYPE_PAIR(pssub_db);
-    DEFINE_RTYPE_PAIR(pssub_dh);
-    DEFINE_RTYPE_PAIR(pssub_dw);
-    DEFINE_RTYPE(pssubu_b);
-    DEFINE_RTYPE(pssubu_h);
-    DEFINE_RTYPE_PAIR(pssubu_db);
-    DEFINE_RTYPE_PAIR(pssubu_dh);
-    DEFINE_RTYPE_PAIR(pssubu_dw);
-    DEFINE_RTYPE(psa_hx);
-    DEFINE_RTYPE_PAIR(psa_dhx);
-    DEFINE_RTYPE(psas_hx);
-    DEFINE_RTYPE_PAIR(psas_dhx);
-    DEFINE_RTYPE(pssa_hx);
-    DEFINE_RTYPE_PAIR(pssa_dhx);
-    DEFINE_RTYPE(pmax_b);
-    DEFINE_RTYPE(pmax_h);
-    DEFINE_RTYPE_PAIR(pmax_db);
-    DEFINE_RTYPE_PAIR(pmax_dh);
-    DEFINE_RTYPE_PAIR(pmax_dw);
-    DEFINE_RTYPE(pmaxu_b);
-    DEFINE_RTYPE(pmaxu_h);
-    DEFINE_RTYPE_PAIR(pmaxu_db);
-    DEFINE_RTYPE_PAIR(pmaxu_dh);
-    DEFINE_RTYPE_PAIR(pmaxu_dw);
-    DEFINE_RTYPE(pmin_b);
-    DEFINE_RTYPE(pmin_h);
-    DEFINE_RTYPE_PAIR(pmin_db);
-    DEFINE_RTYPE_PAIR(pmin_dh);
-    DEFINE_RTYPE_PAIR(pmin_dw);
-    DEFINE_RTYPE(pminu_b);
-    DEFINE_RTYPE(pminu_h);
-    DEFINE_RTYPE_PAIR(pminu_db);
-    DEFINE_RTYPE_PAIR(pminu_dh);
-    DEFINE_RTYPE_PAIR(pminu_dw);
-    DEFINE_RTYPE(pmseq_b);
-    DEFINE_RTYPE(pmseq_h);
-    DEFINE_RTYPE_PAIR(pmseq_db);
-    DEFINE_RTYPE_PAIR(pmseq_dh);
-    DEFINE_RTYPE_PAIR(pmseq_dw);
-    DEFINE_RTYPE(pmslt_b);
-    DEFINE_RTYPE(pmslt_h);
-    DEFINE_RTYPE_PAIR(pmslt_db);
-    DEFINE_RTYPE_PAIR(pmslt_dh);
-    DEFINE_RTYPE_PAIR(pmslt_dw);
-    DEFINE_RTYPE(pmsltu_b);
-    DEFINE_RTYPE(pmsltu_h);
-    DEFINE_RTYPE_PAIR(pmsltu_db);
-    DEFINE_RTYPE_PAIR(pmsltu_dh);
-    DEFINE_RTYPE_PAIR(pmsltu_dw);
-    DEFINE_RTYPE(psll_bs);
-    DEFINE_RTYPE(psll_hs);
-    // Type 3: rdp + rs1p - Doubleword shift with scalar rs2
-    DEFINE_RTYPE_RDP_RS1P(psll_dbs);
-    DEFINE_RTYPE_RDP_RS1P(psll_dhs);
-    DEFINE_RTYPE_RDP_RS1P(psll_dws);
-    DEFINE_RTYPE(psra_bs);
-    DEFINE_RTYPE(psra_hs);
-    DEFINE_RTYPE_RDP_RS1P(psra_dbs);
-    DEFINE_RTYPE_RDP_RS1P(psra_dhs);
-    DEFINE_RTYPE_RDP_RS1P(psra_dws);
-    DEFINE_RTYPE(psrl_bs);
-    DEFINE_RTYPE(psrl_hs);
-    DEFINE_RTYPE_RDP_RS1P(psrl_dbs);
-    DEFINE_RTYPE_RDP_RS1P(psrl_dhs);
-    DEFINE_RTYPE_RDP_RS1P(psrl_dws);
-    DEFINE_RTYPE(pssha_hs);
-    DEFINE_RTYPE_RDP_RS1P(pssha_dhs);
-    DEFINE_RTYPE_RDP_RS1P(pssha_dws);
-    DEFINE_RTYPE(psshar_hs);
-    DEFINE_RTYPE_RDP_RS1P(psshar_dhs);
-    DEFINE_RTYPE_RDP_RS1P(psshar_dws);
-    DEFINE_RTYPE(psshl_hs);
-    DEFINE_RTYPE_RDP_RS1P(psshl_dhs);
-    DEFINE_RTYPE_RDP_RS1P(psshl_dws);
-    DEFINE_RTYPE(psshlr_hs);
-    DEFINE_RTYPE_RDP_RS1P(psshlr_dhs);
-    DEFINE_RTYPE_RDP_RS1P(psshlr_dws);
-    DEFINE_RTYPE(psh1add_h);
-    DEFINE_RTYPE_PAIR(psh1add_dh);
-    DEFINE_RTYPE_PAIR(psh1add_dw);
-    DEFINE_RTYPE(pssh1sadd_h);
-    DEFINE_RTYPE_PAIR(pssh1sadd_dh);
-    DEFINE_RTYPE_PAIR(pssh1sadd_dw);
-    // Type 2: rs1p - Narrowing with scalar rs2
-    DEFINE_RTYPE_RS1P(pnclip_bs);
-    DEFINE_RTYPE_RS1P(pnclip_hs);
-    DEFINE_RTYPE_RS1P(pnclipr_bs);
-    DEFINE_RTYPE_RS1P(pnclipr_hs);
-    DEFINE_RTYPE_RS1P(pnclipu_bs);
-    DEFINE_RTYPE_RS1P(pnclipu_hs);
-    DEFINE_RTYPE_RS1P(pnclipru_bs);
-    DEFINE_RTYPE_RS1P(pnclipru_hs);
-    DEFINE_RTYPE_RS1P(pnsra_bs);
-    DEFINE_RTYPE_RS1P(pnsra_hs);
-    DEFINE_RTYPE_RS1P(pnsrar_bs);
-    DEFINE_RTYPE_RS1P(pnsrar_hs);
-    DEFINE_RTYPE_RS1P(pnsrl_bs);
-    DEFINE_RTYPE_RS1P(pnsrl_hs);
-    // Type 1: rdp - Widening with scalar rs2
-    DEFINE_RTYPE_RDP(pwsll_bs);
-    DEFINE_RTYPE_RDP(pwsll_hs);
-    DEFINE_RTYPE_RDP(pwsla_bs);
-    DEFINE_RTYPE_RDP(pwsla_hs);
-    DEFINE_RTYPE(ppaire_b);
-    DEFINE_RTYPE(ppaire_h);
-    DEFINE_RTYPE_PAIR(ppaire_db);
-    DEFINE_RTYPE_PAIR(ppaire_dh);
-    DEFINE_RTYPE(ppaireo_b);
-    DEFINE_RTYPE(ppaireo_h);
-    DEFINE_RTYPE_PAIR(ppaireo_db);
-    DEFINE_RTYPE_PAIR(ppaireo_dh);
-    DEFINE_RTYPE(ppairo_b);
-    DEFINE_RTYPE(ppairo_h);
-    DEFINE_RTYPE_PAIR(ppairo_db);
-    DEFINE_RTYPE_PAIR(ppairo_dh);
-    DEFINE_RTYPE(ppairoe_b);
-    DEFINE_RTYPE(ppairoe_h);
-    DEFINE_RTYPE_PAIR(ppairoe_db);
-    DEFINE_RTYPE_PAIR(ppairoe_dh);
-    DEFINE_RTYPE(predsum_bs);
-    DEFINE_RTYPE(predsum_hs);
-    // Type 2: rs1p - Reduction sum (rd normal, rs1p is pair)
-    DEFINE_RTYPE_RS1P(predsum_dbs);
-    DEFINE_RTYPE_RS1P(predsum_dhs);
-    DEFINE_RTYPE(predsumu_bs);
-    DEFINE_RTYPE(predsumu_hs);
-    DEFINE_RTYPE_RS1P(predsumu_dbs);
-    DEFINE_RTYPE_RS1P(predsumu_dhs);
+    add({
+      INSN(paadd_b, "rd,rs1,rs2"),
+      INSN(paadd_h, "rd,rs1,rs2"),
+      // Type 4: rdp + rs1p + rs2p - Doubleword pair-to-pair ops
+      INSN(paadd_db, "rdp,rs1p,rs2p"),
+      INSN(paadd_dh, "rdp,rs1p,rs2p"),
+      INSN(paadd_dw, "rdp,rs1p,rs2p"),
+      INSN(paaddu_b, "rd,rs1,rs2"),
+      INSN(paaddu_h, "rd,rs1,rs2"),
+      INSN(paaddu_db, "rdp,rs1p,rs2p"),
+      INSN(paaddu_dh, "rdp,rs1p,rs2p"),
+      INSN(paaddu_dw, "rdp,rs1p,rs2p"),
+      INSN(paas_hx, "rd,rs1,rs2"),
+      INSN(paas_dhx, "rdp,rs1p,rs2p"),
+      INSN(pabd_b, "rd,rs1,rs2"),
+      INSN(pabd_h, "rd,rs1,rs2"),
+      INSN(pabd_db, "rdp,rs1p,rs2p"),
+      INSN(pabd_dh, "rdp,rs1p,rs2p"),
+      INSN(pabdu_b, "rd,rs1,rs2"),
+      INSN(pabdu_h, "rd,rs1,rs2"),
+      INSN(pabdu_db, "rdp,rs1p,rs2p"),
+      INSN(pabdu_dh, "rdp,rs1p,rs2p"),
+      INSN(pabdsumu_b, "rd,rs1,rs2"),
+      INSN(pabdsumau_b, "rd,rs1,rs2"),
+      INSN(padd_b, "rd,rs1,rs2"),
+      INSN(padd_h, "rd,rs1,rs2"),
+      INSN(padd_bs, "rd,rs1,rs2"),
+      INSN(padd_hs, "rd,rs1,rs2"),
+      INSN(padd_db, "rdp,rs1p,rs2p"),
+      INSN(padd_dh, "rdp,rs1p,rs2p"),
+      INSN(padd_dw, "rdp,rs1p,rs2p"),
+      // Type 3: rdp + rs1p - Doubleword with scalar rs2
+      INSN(padd_dbs, "rdp,rs1p,rs2"),
+      INSN(padd_dhs, "rdp,rs1p,rs2"),
+      INSN(padd_dws, "rdp,rs1p,rs2"),
+      INSN(pasub_b, "rd,rs1,rs2"),
+      INSN(pasub_h, "rd,rs1,rs2"),
+      INSN(pasub_db, "rdp,rs1p,rs2p"),
+      INSN(pasub_dh, "rdp,rs1p,rs2p"),
+      INSN(pasub_dw, "rdp,rs1p,rs2p"),
+      INSN(pasubu_b, "rd,rs1,rs2"),
+      INSN(pasubu_h, "rd,rs1,rs2"),
+      INSN(pasubu_db, "rdp,rs1p,rs2p"),
+      INSN(pasubu_dh, "rdp,rs1p,rs2p"),
+      INSN(pasubu_dw, "rdp,rs1p,rs2p"),
+      INSN(pasa_hx, "rd,rs1,rs2"),
+      INSN(pasa_dhx, "rdp,rs1p,rs2p"),
+      INSN(pas_hx, "rd,rs1,rs2"),
+      INSN(pas_dhx, "rdp,rs1p,rs2p"),
+      INSN(psadd_b, "rd,rs1,rs2"),
+      INSN(psadd_h, "rd,rs1,rs2"),
+      INSN(psadd_db, "rdp,rs1p,rs2p"),
+      INSN(psadd_dh, "rdp,rs1p,rs2p"),
+      INSN(psadd_dw, "rdp,rs1p,rs2p"),
+      INSN(psaddu_b, "rd,rs1,rs2"),
+      INSN(psaddu_h, "rd,rs1,rs2"),
+      INSN(psaddu_db, "rdp,rs1p,rs2p"),
+      INSN(psaddu_dh, "rdp,rs1p,rs2p"),
+      INSN(psaddu_dw, "rdp,rs1p,rs2p"),
+      INSN(psub_b, "rd,rs1,rs2"),
+      INSN(psub_h, "rd,rs1,rs2"),
+      INSN(psub_db, "rdp,rs1p,rs2p"),
+      INSN(psub_dh, "rdp,rs1p,rs2p"),
+      INSN(psub_dw, "rdp,rs1p,rs2p"),
+      INSN(pssub_b, "rd,rs1,rs2"),
+      INSN(pssub_h, "rd,rs1,rs2"),
+      INSN(pssub_db, "rdp,rs1p,rs2p"),
+      INSN(pssub_dh, "rdp,rs1p,rs2p"),
+      INSN(pssub_dw, "rdp,rs1p,rs2p"),
+      INSN(pssubu_b, "rd,rs1,rs2"),
+      INSN(pssubu_h, "rd,rs1,rs2"),
+      INSN(pssubu_db, "rdp,rs1p,rs2p"),
+      INSN(pssubu_dh, "rdp,rs1p,rs2p"),
+      INSN(pssubu_dw, "rdp,rs1p,rs2p"),
+      INSN(psa_hx, "rd,rs1,rs2"),
+      INSN(psa_dhx, "rdp,rs1p,rs2p"),
+      INSN(psas_hx, "rd,rs1,rs2"),
+      INSN(psas_dhx, "rdp,rs1p,rs2p"),
+      INSN(pssa_hx, "rd,rs1,rs2"),
+      INSN(pssa_dhx, "rdp,rs1p,rs2p"),
+      INSN(pmax_b, "rd,rs1,rs2"),
+      INSN(pmax_h, "rd,rs1,rs2"),
+      INSN(pmax_db, "rdp,rs1p,rs2p"),
+      INSN(pmax_dh, "rdp,rs1p,rs2p"),
+      INSN(pmax_dw, "rdp,rs1p,rs2p"),
+      INSN(pmaxu_b, "rd,rs1,rs2"),
+      INSN(pmaxu_h, "rd,rs1,rs2"),
+      INSN(pmaxu_db, "rdp,rs1p,rs2p"),
+      INSN(pmaxu_dh, "rdp,rs1p,rs2p"),
+      INSN(pmaxu_dw, "rdp,rs1p,rs2p"),
+      INSN(pmin_b, "rd,rs1,rs2"),
+      INSN(pmin_h, "rd,rs1,rs2"),
+      INSN(pmin_db, "rdp,rs1p,rs2p"),
+      INSN(pmin_dh, "rdp,rs1p,rs2p"),
+      INSN(pmin_dw, "rdp,rs1p,rs2p"),
+      INSN(pminu_b, "rd,rs1,rs2"),
+      INSN(pminu_h, "rd,rs1,rs2"),
+      INSN(pminu_db, "rdp,rs1p,rs2p"),
+      INSN(pminu_dh, "rdp,rs1p,rs2p"),
+      INSN(pminu_dw, "rdp,rs1p,rs2p"),
+      INSN(pmseq_b, "rd,rs1,rs2"),
+      INSN(pmseq_h, "rd,rs1,rs2"),
+      INSN(pmseq_db, "rdp,rs1p,rs2p"),
+      INSN(pmseq_dh, "rdp,rs1p,rs2p"),
+      INSN(pmseq_dw, "rdp,rs1p,rs2p"),
+      INSN(pmslt_b, "rd,rs1,rs2"),
+      INSN(pmslt_h, "rd,rs1,rs2"),
+      INSN(pmslt_db, "rdp,rs1p,rs2p"),
+      INSN(pmslt_dh, "rdp,rs1p,rs2p"),
+      INSN(pmslt_dw, "rdp,rs1p,rs2p"),
+      INSN(pmsltu_b, "rd,rs1,rs2"),
+      INSN(pmsltu_h, "rd,rs1,rs2"),
+      INSN(pmsltu_db, "rdp,rs1p,rs2p"),
+      INSN(pmsltu_dh, "rdp,rs1p,rs2p"),
+      INSN(pmsltu_dw, "rdp,rs1p,rs2p"),
+      INSN(psll_bs, "rd,rs1,rs2"),
+      INSN(psll_hs, "rd,rs1,rs2"),
+      // Type 3: rdp + rs1p - Doubleword shift with scalar rs2
+      INSN(psll_dbs, "rdp,rs1p,rs2"),
+      INSN(psll_dhs, "rdp,rs1p,rs2"),
+      INSN(psll_dws, "rdp,rs1p,rs2"),
+      INSN(psra_bs, "rd,rs1,rs2"),
+      INSN(psra_hs, "rd,rs1,rs2"),
+      INSN(psra_dbs, "rdp,rs1p,rs2"),
+      INSN(psra_dhs, "rdp,rs1p,rs2"),
+      INSN(psra_dws, "rdp,rs1p,rs2"),
+      INSN(psrl_bs, "rd,rs1,rs2"),
+      INSN(psrl_hs, "rd,rs1,rs2"),
+      INSN(psrl_dbs, "rdp,rs1p,rs2"),
+      INSN(psrl_dhs, "rdp,rs1p,rs2"),
+      INSN(psrl_dws, "rdp,rs1p,rs2"),
+      INSN(pssha_hs, "rd,rs1,rs2"),
+      INSN(pssha_dhs, "rdp,rs1p,rs2"),
+      INSN(pssha_dws, "rdp,rs1p,rs2"),
+      INSN(psshar_hs, "rd,rs1,rs2"),
+      INSN(psshar_dhs, "rdp,rs1p,rs2"),
+      INSN(psshar_dws, "rdp,rs1p,rs2"),
+      INSN(psshl_hs, "rd,rs1,rs2"),
+      INSN(psshl_dhs, "rdp,rs1p,rs2"),
+      INSN(psshl_dws, "rdp,rs1p,rs2"),
+      INSN(psshlr_hs, "rd,rs1,rs2"),
+      INSN(psshlr_dhs, "rdp,rs1p,rs2"),
+      INSN(psshlr_dws, "rdp,rs1p,rs2"),
+      INSN(psh1add_h, "rd,rs1,rs2"),
+      INSN(psh1add_dh, "rdp,rs1p,rs2p"),
+      INSN(psh1add_dw, "rdp,rs1p,rs2p"),
+      INSN(pssh1sadd_h, "rd,rs1,rs2"),
+      INSN(pssh1sadd_dh, "rdp,rs1p,rs2p"),
+      INSN(pssh1sadd_dw, "rdp,rs1p,rs2p"),
+      // Type 2: rs1p - Narrowing with scalar rs2
+      INSN(pnclip_bs, "rd,rs1p,rs2"),
+      INSN(pnclip_hs, "rd,rs1p,rs2"),
+      INSN(pnclipr_bs, "rd,rs1p,rs2"),
+      INSN(pnclipr_hs, "rd,rs1p,rs2"),
+      INSN(pnclipu_bs, "rd,rs1p,rs2"),
+      INSN(pnclipu_hs, "rd,rs1p,rs2"),
+      INSN(pnclipru_bs, "rd,rs1p,rs2"),
+      INSN(pnclipru_hs, "rd,rs1p,rs2"),
+      INSN(pnsra_bs, "rd,rs1p,rs2"),
+      INSN(pnsra_hs, "rd,rs1p,rs2"),
+      INSN(pnsrar_bs, "rd,rs1p,rs2"),
+      INSN(pnsrar_hs, "rd,rs1p,rs2"),
+      INSN(pnsrl_bs, "rd,rs1p,rs2"),
+      INSN(pnsrl_hs, "rd,rs1p,rs2"),
+      // Type 1: rdp - Widening with scalar rs2
+      INSN(pwsll_bs, "rdp,rs1,rs2"),
+      INSN(pwsll_hs, "rdp,rs1,rs2"),
+      INSN(pwsla_bs, "rdp,rs1,rs2"),
+      INSN(pwsla_hs, "rdp,rs1,rs2"),
+      INSN(ppaire_b, "rd,rs1,rs2"),
+      INSN(ppaire_h, "rd,rs1,rs2"),
+      INSN(ppaire_db, "rdp,rs1p,rs2p"),
+      INSN(ppaire_dh, "rdp,rs1p,rs2p"),
+      INSN(ppaireo_b, "rd,rs1,rs2"),
+      INSN(ppaireo_h, "rd,rs1,rs2"),
+      INSN(ppaireo_db, "rdp,rs1p,rs2p"),
+      INSN(ppaireo_dh, "rdp,rs1p,rs2p"),
+      INSN(ppairo_b, "rd,rs1,rs2"),
+      INSN(ppairo_h, "rd,rs1,rs2"),
+      INSN(ppairo_db, "rdp,rs1p,rs2p"),
+      INSN(ppairo_dh, "rdp,rs1p,rs2p"),
+      INSN(ppairoe_b, "rd,rs1,rs2"),
+      INSN(ppairoe_h, "rd,rs1,rs2"),
+      INSN(ppairoe_db, "rdp,rs1p,rs2p"),
+      INSN(ppairoe_dh, "rdp,rs1p,rs2p"),
+      INSN(predsum_bs, "rd,rs1,rs2"),
+      INSN(predsum_hs, "rd,rs1,rs2"),
+      // Type 2: rs1p - Reduction sum (rd normal, rs1p is pair)
+      INSN(predsum_dbs, "rd,rs1p,rs2"),
+      INSN(predsum_dhs, "rd,rs1p,rs2"),
+      INSN(predsumu_bs, "rd,rs1,rs2"),
+      INSN(predsumu_hs, "rd,rs1,rs2"),
+      INSN(predsumu_dbs, "rd,rs1p,rs2"),
+      INSN(predsumu_dhs, "rd,rs1p,rs2"),
 
-    // Packed R1-type instructions (rd, rs1) - unary
-    DEFINE_R1TYPE(psabs_b);
-    DEFINE_R1TYPE(psabs_h);
-    // Type 3: rdp + rs1p - Doubleword unary ops
-    DEFINE_R1TYPE_RDP_RS1P(psabs_db);
-    DEFINE_R1TYPE_RDP_RS1P(psabs_dh);
-    DEFINE_R1TYPE(psext_h_b);
-    DEFINE_R1TYPE_RDP_RS1P(psext_dh_b);
-    DEFINE_R1TYPE_RDP_RS1P(psext_dw_b);
-    DEFINE_R1TYPE_RDP_RS1P(psext_dw_h);
+      // Packed R1-type instructions (rd, rs1) - unary
+      INSN(psabs_b, "rd,rs1"),
+      INSN(psabs_h, "rd,rs1"),
+      // Type 3: rdp + rs1p - Doubleword unary ops
+      INSN(psabs_db, "rdp,rs1p"),
+      INSN(psabs_dh, "rdp,rs1p"),
+      INSN(psext_h_b, "rd,rs1"),
+      INSN(psext_dh_b, "rdp,rs1p"),
+      INSN(psext_dw_b, "rdp,rs1p"),
+      INSN(psext_dw_h, "rdp,rs1p"),
 
-    // Packed I-type with shamt
-    DISASM_INSN("pslli.b", pslli_b, 0, {&xrd, &xrs1, &shamtb});
-    DISASM_INSN("pslli.h", pslli_h, 0, {&xrd, &xrs1, &shamth});
-    // Type 3: rdp + rs1p - Doubleword immediate shift
-    DISASM_INSN("pslli.db", pslli_db, 0, {&xrd_p, &xrs1_p, &shamtb});
-    DISASM_INSN("pslli.dh", pslli_dh, 0, {&xrd_p, &xrs1_p, &shamth});
-    DISASM_INSN("pslli.dw", pslli_dw, 0, {&xrd_p, &xrs1_p, &shamtw});
-    DISASM_INSN("psrai.b", psrai_b, 0, {&xrd, &xrs1, &shamtb});
-    DISASM_INSN("psrai.h", psrai_h, 0, {&xrd, &xrs1, &shamth});
-    DISASM_INSN("psrai.db", psrai_db, 0, {&xrd_p, &xrs1_p, &shamtb});
-    DISASM_INSN("psrai.dh", psrai_dh, 0, {&xrd_p, &xrs1_p, &shamth});
-    DISASM_INSN("psrai.dw", psrai_dw, 0, {&xrd_p, &xrs1_p, &shamtw});
-    DISASM_INSN("psrli.b", psrli_b, 0, {&xrd, &xrs1, &shamtb});
-    DISASM_INSN("psrli.h", psrli_h, 0, {&xrd, &xrs1, &shamth});
-    DISASM_INSN("psrli.db", psrli_db, 0, {&xrd_p, &xrs1_p, &shamtb});
-    DISASM_INSN("psrli.dh", psrli_dh, 0, {&xrd_p, &xrs1_p, &shamth});
-    DISASM_INSN("psrli.dw", psrli_dw, 0, {&xrd_p, &xrs1_p, &shamtw});
-    DISASM_INSN("psrari.h", psrari_h, 0, {&xrd, &xrs1, &shamth});
-    DISASM_INSN("psrari.dh", psrari_dh, 0, {&xrd_p, &xrs1_p, &shamth});
-    DISASM_INSN("psrari.dw", psrari_dw, 0, {&xrd_p, &xrs1_p, &shamtw});
-    DISASM_INSN("psati.h", psati_h, 0, {&xrd, &xrs1, &shamth});
-    DISASM_INSN("psati.dh", psati_dh, 0, {&xrd_p, &xrs1_p, &shamth});
-    DISASM_INSN("psati.dw", psati_dw, 0, {&xrd_p, &xrs1_p, &shamtw});
-    DISASM_INSN("pusati.h", pusati_h, 0, {&xrd, &xrs1, &shamth});
-    DISASM_INSN("pusati.dh", pusati_dh, 0, {&xrd_p, &xrs1_p, &shamth});
-    DISASM_INSN("pusati.dw", pusati_dw, 0, {&xrd_p, &xrs1_p, &shamtw});
-    DISASM_INSN("psslai.h", psslai_h, 0, {&xrd, &xrs1, &shamth});
-    DISASM_INSN("psslai.dh", psslai_dh, 0, {&xrd_p, &xrs1_p, &shamth});
-    DISASM_INSN("psslai.dw", psslai_dw, 0, {&xrd_p, &xrs1_p, &shamtw});
-    // Type 2: rs1p - Narrowing immediate (rd normal, rs1p is pair)
-    DISASM_INSN("pnclipi.b", pnclipi_b, 0, {&xrd, &xrs1_p, &shamth});
-    DISASM_INSN("pnclipi.h", pnclipi_h, 0, {&xrd, &xrs1_p, &shamtw});
-    DISASM_INSN("pnclipiu.b", pnclipiu_b, 0, {&xrd, &xrs1_p, &shamth});
-    DISASM_INSN("pnclipiu.h", pnclipiu_h, 0, {&xrd, &xrs1_p, &shamtw});
-    DISASM_INSN("pnclipri.b", pnclipri_b, 0, {&xrd, &xrs1_p, &shamth});
-    DISASM_INSN("pnclipri.h", pnclipri_h, 0, {&xrd, &xrs1_p, &shamtw});
-    DISASM_INSN("pnclipriu.b", pnclipriu_b, 0, {&xrd, &xrs1_p, &shamth});
-    DISASM_INSN("pnclipriu.h", pnclipriu_h, 0, {&xrd, &xrs1_p, &shamtw});
-    DISASM_INSN("pnsrai.b", pnsrai_b, 0, {&xrd, &xrs1_p, &shamth});
-    DISASM_INSN("pnsrai.h", pnsrai_h, 0, {&xrd, &xrs1_p, &shamtw});
-    DISASM_INSN("pnsrari.b", pnsrari_b, 0, {&xrd, &xrs1_p, &shamth});
-    DISASM_INSN("pnsrari.h", pnsrari_h, 0, {&xrd, &xrs1_p, &shamtw});
-    DISASM_INSN("pnsrli.b", pnsrli_b, 0, {&xrd, &xrs1_p, &shamth});
-    DISASM_INSN("pnsrli.h", pnsrli_h, 0, {&xrd, &xrs1_p, &shamtw});
-    // Type 1: rdp - Widening immediate (rdp is pair, rs1 normal)
-    DISASM_INSN("pwslli.b", pwslli_b, 0, {&xrd_p, &xrs1, &shamtb});
-    DISASM_INSN("pwslli.h", pwslli_h, 0, {&xrd_p, &xrs1, &shamth});
-    DISASM_INSN("pwslai.b", pwslai_b, 0, {&xrd_p, &xrs1, &shamtb});
-    DISASM_INSN("pwslai.h", pwslai_h, 0, {&xrd_p, &xrs1, &shamth});
+      // Packed I-type with shamt
+      INSN(pslli_b, "rd,rs1,shamtb"),
+      INSN(pslli_h, "rd,rs1,shamth"),
+      // Type 3: rdp + rs1p - Doubleword immediate shift
+      INSN(pslli_db, "rdp,rs1p,shamtb"),
+      INSN(pslli_dh, "rdp,rs1p,shamth"),
+      INSN(pslli_dw, "rdp,rs1p,shamtw"),
+      INSN(psrai_b, "rd,rs1,shamtb"),
+      INSN(psrai_h, "rd,rs1,shamth"),
+      INSN(psrai_db, "rdp,rs1p,shamtb"),
+      INSN(psrai_dh, "rdp,rs1p,shamth"),
+      INSN(psrai_dw, "rdp,rs1p,shamtw"),
+      INSN(psrli_b, "rd,rs1,shamtb"),
+      INSN(psrli_h, "rd,rs1,shamth"),
+      INSN(psrli_db, "rdp,rs1p,shamtb"),
+      INSN(psrli_dh, "rdp,rs1p,shamth"),
+      INSN(psrli_dw, "rdp,rs1p,shamtw"),
+      INSN(psrari_h, "rd,rs1,shamth"),
+      INSN(psrari_dh, "rdp,rs1p,shamth"),
+      INSN(psrari_dw, "rdp,rs1p,shamtw"),
+      INSN(psati_h, "rd,rs1,shamth"),
+      INSN(psati_dh, "rdp,rs1p,shamth"),
+      INSN(psati_dw, "rdp,rs1p,shamtw"),
+      INSN(pusati_h, "rd,rs1,shamth"),
+      INSN(pusati_dh, "rdp,rs1p,shamth"),
+      INSN(pusati_dw, "rdp,rs1p,shamtw"),
+      INSN(psslai_h, "rd,rs1,shamth"),
+      INSN(psslai_dh, "rdp,rs1p,shamth"),
+      INSN(psslai_dw, "rdp,rs1p,shamtw"),
+      // Type 2: rs1p - Narrowing immediate (rd normal, rs1p is pair)
+      INSN(pnclipi_b, "rd,rs1p,shamth"),
+      INSN(pnclipi_h, "rd,rs1p,shamtw"),
+      INSN(pnclipiu_b, "rd,rs1p,shamth"),
+      INSN(pnclipiu_h, "rd,rs1p,shamtw"),
+      INSN(pnclipri_b, "rd,rs1p,shamth"),
+      INSN(pnclipri_h, "rd,rs1p,shamtw"),
+      INSN(pnclipriu_b, "rd,rs1p,shamth"),
+      INSN(pnclipriu_h, "rd,rs1p,shamtw"),
+      INSN(pnsrai_b, "rd,rs1p,shamth"),
+      INSN(pnsrai_h, "rd,rs1p,shamtw"),
+      INSN(pnsrari_b, "rd,rs1p,shamth"),
+      INSN(pnsrari_h, "rd,rs1p,shamtw"),
+      INSN(pnsrli_b, "rd,rs1p,shamth"),
+      INSN(pnsrli_h, "rd,rs1p,shamtw"),
+      // Type 1: rdp - Widening immediate (rdp is pair, rs1 normal)
+      INSN(pwslli_b, "rdp,rs1,shamtb"),
+      INSN(pwslli_h, "rdp,rs1,shamth"),
+      INSN(pwslai_b, "rdp,rs1,shamtb"),
+      INSN(pwslai_h, "rdp,rs1,shamth"),
 
-    // Packed load-immediate instructions (rd, imm) - Type 1: rdp for _db, _dh
-    DISASM_INSN("pli.b", pli_b, 0, {&xrd, &p_imm8});
-    DISASM_INSN("pli.h", pli_h, 0, {&xrd, &p_imm10csl});
-    DISASM_INSN("pli.db", pli_db, 0, {&xrd_p, &p_imm8});
-    DISASM_INSN("pli.dh", pli_dh, 0, {&xrd_p, &p_imm10csl});
-    DISASM_INSN("plui.h", plui_h, 0, {&xrd, &p_imm10csr});
-    DISASM_INSN("plui.dh", plui_dh, 0, {&xrd_p, &p_imm10csr});
+      // Packed load-immediate instructions (rd, imm) - Type 1: rdp for _db, _dh
+      INSN(pli_b, "rd,p_imm8"),
+      INSN(pli_h, "rd,p_imm10csl"),
+      INSN(pli_db, "rdp,p_imm8"),
+      INSN(pli_dh, "rdp,p_imm10csl"),
+      INSN(plui_h, "rd,p_imm10csr"),
+      INSN(plui_dh, "rdp,p_imm10csr"),
 
-    // Packed multiply/mac instructions
-    DEFINE_RTYPE(pmul_h_b00);
-    DEFINE_RTYPE(pmul_h_b01);
-    DEFINE_RTYPE(pmul_h_b11);
-    DEFINE_RTYPE(pmulu_h_b00);
-    DEFINE_RTYPE(pmulu_h_b01);
-    DEFINE_RTYPE(pmulu_h_b11);
-    DEFINE_RTYPE(pmulsu_h_b00);
-    DEFINE_RTYPE(pmulsu_h_b11);
-    DEFINE_RTYPE(pmulh_h);
-    DEFINE_RTYPE(pmulhu_h);
-    DEFINE_RTYPE(pmulhsu_h);
-    DEFINE_RTYPE(pmulh_h_b0);
-    DEFINE_RTYPE(pmulh_h_b1);
-    DEFINE_RTYPE(pmulhsu_h_b0);
-    DEFINE_RTYPE(pmulhsu_h_b1);
-    DEFINE_RTYPE(pmulhr_h);
-    DEFINE_RTYPE(pmulhru_h);
-    DEFINE_RTYPE(pmulhrsu_h);
-    DEFINE_RTYPE(pmulq_h);
-    DEFINE_RTYPE(pmulqr_h);
-    DEFINE_RTYPE(pmhacc_h);
-    DEFINE_RTYPE(pmhaccu_h);
-    DEFINE_RTYPE(pmhaccsu_h);
-    DEFINE_RTYPE(pmhacc_h_b0);
-    DEFINE_RTYPE(pmhacc_h_b1);
-    DEFINE_RTYPE(pmhaccsu_h_b0);
-    DEFINE_RTYPE(pmhaccsu_h_b1);
-    DEFINE_RTYPE(pmhracc_h);
-    DEFINE_RTYPE(pmhraccu_h);
-    DEFINE_RTYPE(pmhraccsu_h);
-    DEFINE_RTYPE(pmq2add_h);
-    DEFINE_RTYPE(pmq2adda_h);
-    DEFINE_RTYPE(pmqr2add_h);
-    DEFINE_RTYPE(pmqr2adda_h);
+      // Packed multiply/mac instructions
+      INSN(pmul_h_b00, "rd,rs1,rs2"),
+      INSN(pmul_h_b01, "rd,rs1,rs2"),
+      INSN(pmul_h_b11, "rd,rs1,rs2"),
+      INSN(pmulu_h_b00, "rd,rs1,rs2"),
+      INSN(pmulu_h_b01, "rd,rs1,rs2"),
+      INSN(pmulu_h_b11, "rd,rs1,rs2"),
+      INSN(pmulsu_h_b00, "rd,rs1,rs2"),
+      INSN(pmulsu_h_b11, "rd,rs1,rs2"),
+      INSN(pmulh_h, "rd,rs1,rs2"),
+      INSN(pmulhu_h, "rd,rs1,rs2"),
+      INSN(pmulhsu_h, "rd,rs1,rs2"),
+      INSN(pmulh_h_b0, "rd,rs1,rs2"),
+      INSN(pmulh_h_b1, "rd,rs1,rs2"),
+      INSN(pmulhsu_h_b0, "rd,rs1,rs2"),
+      INSN(pmulhsu_h_b1, "rd,rs1,rs2"),
+      INSN(pmulhr_h, "rd,rs1,rs2"),
+      INSN(pmulhru_h, "rd,rs1,rs2"),
+      INSN(pmulhrsu_h, "rd,rs1,rs2"),
+      INSN(pmulq_h, "rd,rs1,rs2"),
+      INSN(pmulqr_h, "rd,rs1,rs2"),
+      INSN(pmhacc_h, "rd,rs1,rs2"),
+      INSN(pmhaccu_h, "rd,rs1,rs2"),
+      INSN(pmhaccsu_h, "rd,rs1,rs2"),
+      INSN(pmhacc_h_b0, "rd,rs1,rs2"),
+      INSN(pmhacc_h_b1, "rd,rs1,rs2"),
+      INSN(pmhaccsu_h_b0, "rd,rs1,rs2"),
+      INSN(pmhaccsu_h_b1, "rd,rs1,rs2"),
+      INSN(pmhracc_h, "rd,rs1,rs2"),
+      INSN(pmhraccu_h, "rd,rs1,rs2"),
+      INSN(pmhraccsu_h, "rd,rs1,rs2"),
+      INSN(pmq2add_h, "rd,rs1,rs2"),
+      INSN(pmq2adda_h, "rd,rs1,rs2"),
+      INSN(pmqr2add_h, "rd,rs1,rs2"),
+      INSN(pmqr2adda_h, "rd,rs1,rs2"),
 
-    // Packed widening instructions - Type 1: rdp (pair result, normal sources)
-    DEFINE_RTYPE_RDP(pwadd_b);
-    DEFINE_RTYPE_RDP(pwadd_h);
-    DEFINE_RTYPE_RDP(pwaddu_b);
-    DEFINE_RTYPE_RDP(pwaddu_h);
-    DEFINE_RTYPE_RDP(pwadda_b);
-    DEFINE_RTYPE_RDP(pwadda_h);
-    DEFINE_RTYPE_RDP(pwaddau_b);
-    DEFINE_RTYPE_RDP(pwaddau_h);
-    DEFINE_RTYPE_RDP(pwsub_b);
-    DEFINE_RTYPE_RDP(pwsub_h);
-    DEFINE_RTYPE_RDP(pwsubu_b);
-    DEFINE_RTYPE_RDP(pwsubu_h);
-    DEFINE_RTYPE_RDP(pwsuba_b);
-    DEFINE_RTYPE_RDP(pwsuba_h);
-    DEFINE_RTYPE_RDP(pwsubau_b);
-    DEFINE_RTYPE_RDP(pwsubau_h);
-    DEFINE_RTYPE_RDP(pwmul_b);
-    DEFINE_RTYPE_RDP(pwmul_h);
-    DEFINE_RTYPE_RDP(pwmulu_b);
-    DEFINE_RTYPE_RDP(pwmulu_h);
-    DEFINE_RTYPE_RDP(pwmulsu_b);
-    DEFINE_RTYPE_RDP(pwmulsu_h);
-    DEFINE_RTYPE_RDP(pwmacc_h);
-    DEFINE_RTYPE_RDP(pwmaccu_h);
-    DEFINE_RTYPE_RDP(pwmaccsu_h);
+      // Packed widening instructions - Type 1: rdp (pair result, normal sources)
+      INSN(pwadd_b, "rdp,rs1,rs2"),
+      INSN(pwadd_h, "rdp,rs1,rs2"),
+      INSN(pwaddu_b, "rdp,rs1,rs2"),
+      INSN(pwaddu_h, "rdp,rs1,rs2"),
+      INSN(pwadda_b, "rdp,rs1,rs2"),
+      INSN(pwadda_h, "rdp,rs1,rs2"),
+      INSN(pwaddau_b, "rdp,rs1,rs2"),
+      INSN(pwaddau_h, "rdp,rs1,rs2"),
+      INSN(pwsub_b, "rdp,rs1,rs2"),
+      INSN(pwsub_h, "rdp,rs1,rs2"),
+      INSN(pwsubu_b, "rdp,rs1,rs2"),
+      INSN(pwsubu_h, "rdp,rs1,rs2"),
+      INSN(pwsuba_b, "rdp,rs1,rs2"),
+      INSN(pwsuba_h, "rdp,rs1,rs2"),
+      INSN(pwsubau_b, "rdp,rs1,rs2"),
+      INSN(pwsubau_h, "rdp,rs1,rs2"),
+      INSN(pwmul_b, "rdp,rs1,rs2"),
+      INSN(pwmul_h, "rdp,rs1,rs2"),
+      INSN(pwmulu_b, "rdp,rs1,rs2"),
+      INSN(pwmulu_h, "rdp,rs1,rs2"),
+      INSN(pwmulsu_b, "rdp,rs1,rs2"),
+      INSN(pwmulsu_h, "rdp,rs1,rs2"),
+      INSN(pwmacc_h, "rdp,rs1,rs2"),
+      INSN(pwmaccu_h, "rdp,rs1,rs2"),
+      INSN(pwmaccsu_h, "rdp,rs1,rs2"),
 
-    // Packed multi-add instructions
-    DEFINE_RTYPE(pm2add_h);
-    DEFINE_RTYPE(pm2add_hx);
-    DEFINE_RTYPE(pm2addu_h);
-    DEFINE_RTYPE(pm2addsu_h);
-    DEFINE_RTYPE(pm2adda_h);
-    DEFINE_RTYPE(pm2adda_hx);
-    DEFINE_RTYPE(pm2addau_h);
-    DEFINE_RTYPE(pm2addasu_h);
-    DEFINE_RTYPE(pm2sub_h);
-    DEFINE_RTYPE(pm2sub_hx);
-    DEFINE_RTYPE(pm2suba_h);
-    DEFINE_RTYPE(pm2suba_hx);
-    DEFINE_RTYPE(pm2sadd_h);
-    DEFINE_RTYPE(pm2sadd_hx);
-    // pm2wadd produces widened result - Type 1: rdp
-    DEFINE_RTYPE_RDP(pm2wadd_h);
-    DEFINE_RTYPE_RDP(pm2wadd_hx);
-    DEFINE_RTYPE_RDP(pm2waddu_h);
-    DEFINE_RTYPE_RDP(pm2waddsu_h);
-    DEFINE_RTYPE_RDP(pm2wadda_h);
-    DEFINE_RTYPE_RDP(pm2wadda_hx);
-    DEFINE_RTYPE_RDP(pm2waddau_h);
-    DEFINE_RTYPE_RDP(pm2waddasu_h);
-    DEFINE_RTYPE_RDP(pm2wsub_h);
-    DEFINE_RTYPE_RDP(pm2wsub_hx);
-    DEFINE_RTYPE_RDP(pm2wsuba_h);
-    DEFINE_RTYPE_RDP(pm2wsuba_hx);
-    DEFINE_RTYPE(pm4add_b);
-    DEFINE_RTYPE(pm4addu_b);
-    DEFINE_RTYPE(pm4addsu_b);
-    DEFINE_RTYPE(pm4adda_b);
-    DEFINE_RTYPE(pm4addau_b);
-    DEFINE_RTYPE(pm4addasu_b);
+      // Packed multi-add instructions
+      INSN(pm2add_h, "rd,rs1,rs2"),
+      INSN(pm2add_hx, "rd,rs1,rs2"),
+      INSN(pm2addu_h, "rd,rs1,rs2"),
+      INSN(pm2addsu_h, "rd,rs1,rs2"),
+      INSN(pm2adda_h, "rd,rs1,rs2"),
+      INSN(pm2adda_hx, "rd,rs1,rs2"),
+      INSN(pm2addau_h, "rd,rs1,rs2"),
+      INSN(pm2addasu_h, "rd,rs1,rs2"),
+      INSN(pm2sub_h, "rd,rs1,rs2"),
+      INSN(pm2sub_hx, "rd,rs1,rs2"),
+      INSN(pm2suba_h, "rd,rs1,rs2"),
+      INSN(pm2suba_hx, "rd,rs1,rs2"),
+      INSN(pm2sadd_h, "rd,rs1,rs2"),
+      INSN(pm2sadd_hx, "rd,rs1,rs2"),
+      // pm2wadd produces widened result - Type 1: rdp
+      INSN(pm2wadd_h, "rdp,rs1,rs2"),
+      INSN(pm2wadd_hx, "rdp,rs1,rs2"),
+      INSN(pm2waddu_h, "rdp,rs1,rs2"),
+      INSN(pm2waddsu_h, "rdp,rs1,rs2"),
+      INSN(pm2wadda_h, "rdp,rs1,rs2"),
+      INSN(pm2wadda_hx, "rdp,rs1,rs2"),
+      INSN(pm2waddau_h, "rdp,rs1,rs2"),
+      INSN(pm2waddasu_h, "rdp,rs1,rs2"),
+      INSN(pm2wsub_h, "rdp,rs1,rs2"),
+      INSN(pm2wsub_hx, "rdp,rs1,rs2"),
+      INSN(pm2wsuba_h, "rdp,rs1,rs2"),
+      INSN(pm2wsuba_hx, "rdp,rs1,rs2"),
+      INSN(pm4add_b, "rd,rs1,rs2"),
+      INSN(pm4addu_b, "rd,rs1,rs2"),
+      INSN(pm4addsu_b, "rd,rs1,rs2"),
+      INSN(pm4adda_b, "rd,rs1,rs2"),
+      INSN(pm4addau_b, "rd,rs1,rs2"),
+      INSN(pm4addasu_b, "rd,rs1,rs2"),
 
-    // Zip/Unzip instructions
-    DEFINE_R1TYPE(zip8p);
-    DEFINE_R1TYPE(zip8hp);
-    DEFINE_R1TYPE(unzip8p);
-    DEFINE_R1TYPE(unzip8hp);
-    DEFINE_R1TYPE(unzip16p);
-    DEFINE_R1TYPE(unzip16hp);
-    // Type 1: rdp - Widening zip (pair result)
-    DEFINE_R1TYPE_RDP(wzip8p);
-    DEFINE_R1TYPE_RDP(wzip16p);
+      // Zip/Unzip instructions
+      INSN(zip8p, "rd,rs1"),
+      INSN(zip8hp, "rd,rs1"),
+      INSN(unzip8p, "rd,rs1"),
+      INSN(unzip8hp, "rd,rs1"),
+      INSN(unzip16p, "rd,rs1"),
+      INSN(unzip16hp, "rd,rs1"),
+      // Type 1: rdp - Widening zip (pair result)
+      INSN(wzip8p, "rdp,rs1"),
+      INSN(wzip16p, "rdp,rs1"),
 
-    // mqwacc instructions - Type 1: rdp (widened 64-bit result)
-    DEFINE_RTYPE_RDP(mqwacc);
-    DEFINE_RTYPE_RDP(mqrwacc);
-    DEFINE_RTYPE_RDP(pmqwacc_h);
-    DEFINE_RTYPE_RDP(pmqrwacc_h);
+      // mqwacc instructions - Type 1: rdp (widened 64-bit result)
+      INSN(mqwacc, "rdp,rs1,rs2"),
+      INSN(mqrwacc, "rdp,rs1,rs2"),
+      INSN(pmqwacc_h, "rdp,rs1,rs2"),
+      INSN(pmqrwacc_h, "rdp,rs1,rs2"),
+    });
 
     // RV64 P-extension instructions (word-sized operations)
     // These share opcodes with RV32 scalar instructions
-    if (xlen_eq(64)) {
+    if (xlen_eq(64)) add({
       // R1-type unary instructions
-      DEFINE_R1TYPE(absw);
-      DEFINE_R1TYPE(clsw);
+      INSN(absw, "rd,rs1"),
+      INSN(clsw, "rd,rs1"),
 
       // R-type scalar MAC/MUL instructions (word-sized)
-      DEFINE_RTYPE(macc_w00);
-      DEFINE_RTYPE(macc_w01);
-      DEFINE_RTYPE(macc_w11);
-      DEFINE_RTYPE(maccu_w00);
-      DEFINE_RTYPE(maccu_w01);
-      DEFINE_RTYPE(maccu_w11);
-      DEFINE_RTYPE(maccsu_w00);
-      DEFINE_RTYPE(maccsu_w11);
-      DEFINE_RTYPE(mul_w00);
-      DEFINE_RTYPE(mul_w01);
-      DEFINE_RTYPE(mul_w11);
-      DEFINE_RTYPE(mulu_w00);
-      DEFINE_RTYPE(mulu_w01);
-      DEFINE_RTYPE(mulu_w11);
-      DEFINE_RTYPE(mulsu_w00);
-      DEFINE_RTYPE(mulsu_w11);
-      DEFINE_RTYPE(mqacc_w00);
-      DEFINE_RTYPE(mqacc_w01);
-      DEFINE_RTYPE(mqacc_w11);
-      DEFINE_RTYPE(mqracc_w00);
-      DEFINE_RTYPE(mqracc_w01);
-      DEFINE_RTYPE(mqracc_w11);
+      INSN(macc_w00, "rd,rs1,rs2"),
+      INSN(macc_w01, "rd,rs1,rs2"),
+      INSN(macc_w11, "rd,rs1,rs2"),
+      INSN(maccu_w00, "rd,rs1,rs2"),
+      INSN(maccu_w01, "rd,rs1,rs2"),
+      INSN(maccu_w11, "rd,rs1,rs2"),
+      INSN(maccsu_w00, "rd,rs1,rs2"),
+      INSN(maccsu_w11, "rd,rs1,rs2"),
+      INSN(mul_w00, "rd,rs1,rs2"),
+      INSN(mul_w01, "rd,rs1,rs2"),
+      INSN(mul_w11, "rd,rs1,rs2"),
+      INSN(mulu_w00, "rd,rs1,rs2"),
+      INSN(mulu_w01, "rd,rs1,rs2"),
+      INSN(mulu_w11, "rd,rs1,rs2"),
+      INSN(mulsu_w00, "rd,rs1,rs2"),
+      INSN(mulsu_w11, "rd,rs1,rs2"),
+      INSN(mqacc_w00, "rd,rs1,rs2"),
+      INSN(mqacc_w01, "rd,rs1,rs2"),
+      INSN(mqacc_w11, "rd,rs1,rs2"),
+      INSN(mqracc_w00, "rd,rs1,rs2"),
+      INSN(mqracc_w01, "rd,rs1,rs2"),
+      INSN(mqracc_w11, "rd,rs1,rs2"),
 
       // R-type packed word-sized instructions (share opcode with RV32 scalar)
-      DEFINE_RTYPE(paadd_w);
-      DEFINE_RTYPE(paaddu_w);
-      DEFINE_RTYPE(paas_wx);
-      DEFINE_RTYPE(padd_w);
-      DEFINE_RTYPE(padd_ws);
-      DEFINE_RTYPE(pasa_wx);
-      DEFINE_RTYPE(pasub_w);
-      DEFINE_RTYPE(pasubu_w);
-      DEFINE_RTYPE(pas_wx);
-      DEFINE_RTYPE(pmax_w);
-      DEFINE_RTYPE(pmaxu_w);
-      DEFINE_RTYPE(pmin_w);
-      DEFINE_RTYPE(pminu_w);
-      DEFINE_RTYPE(pmseq_w);
-      DEFINE_RTYPE(pmslt_w);
-      DEFINE_RTYPE(pmsltu_w);
-      DEFINE_RTYPE(psadd_w);
-      DEFINE_RTYPE(psaddu_w);
-      DEFINE_RTYPE(psa_wx);
-      DEFINE_RTYPE(psas_wx);
-      DEFINE_RTYPE(pssa_wx);
-      DEFINE_RTYPE(pssub_w);
-      DEFINE_RTYPE(pssubu_w);
-      DEFINE_RTYPE(psub_w);
-      DEFINE_RTYPE(psh1add_w);
-      DEFINE_RTYPE(pssh1sadd_w);
-      DEFINE_RTYPE(psll_ws);
-      DEFINE_RTYPE(psra_ws);
-      DEFINE_RTYPE(psrl_ws);
-      DEFINE_RTYPE(pssha_ws);
-      DEFINE_RTYPE(psshar_ws);
-      DEFINE_RTYPE(psshl_ws);
-      DEFINE_RTYPE(psshlr_ws);
-      DEFINE_RTYPE(shl);
-      DEFINE_RTYPE(shlr);
-      DEFINE_RTYPE(pnclipp_b);
-      DEFINE_RTYPE(pnclipp_h);
-      DEFINE_RTYPE(pnclipp_w);
-      DEFINE_RTYPE(pnclipup_b);
-      DEFINE_RTYPE(pnclipup_h);
-      DEFINE_RTYPE(pnclipup_w);
-      DEFINE_RTYPE(ppaireo_w);
-      DEFINE_RTYPE(ppairoe_w);
-      DEFINE_RTYPE(ppairo_w);
-      DEFINE_RTYPE(predsum_ws);
-      DEFINE_RTYPE(predsumu_ws);
+      INSN(paadd_w, "rd,rs1,rs2"),
+      INSN(paaddu_w, "rd,rs1,rs2"),
+      INSN(paas_wx, "rd,rs1,rs2"),
+      INSN(padd_w, "rd,rs1,rs2"),
+      INSN(padd_ws, "rd,rs1,rs2"),
+      INSN(pasa_wx, "rd,rs1,rs2"),
+      INSN(pasub_w, "rd,rs1,rs2"),
+      INSN(pasubu_w, "rd,rs1,rs2"),
+      INSN(pas_wx, "rd,rs1,rs2"),
+      INSN(pmax_w, "rd,rs1,rs2"),
+      INSN(pmaxu_w, "rd,rs1,rs2"),
+      INSN(pmin_w, "rd,rs1,rs2"),
+      INSN(pminu_w, "rd,rs1,rs2"),
+      INSN(pmseq_w, "rd,rs1,rs2"),
+      INSN(pmslt_w, "rd,rs1,rs2"),
+      INSN(pmsltu_w, "rd,rs1,rs2"),
+      INSN(psadd_w, "rd,rs1,rs2"),
+      INSN(psaddu_w, "rd,rs1,rs2"),
+      INSN(psa_wx, "rd,rs1,rs2"),
+      INSN(psas_wx, "rd,rs1,rs2"),
+      INSN(pssa_wx, "rd,rs1,rs2"),
+      INSN(pssub_w, "rd,rs1,rs2"),
+      INSN(pssubu_w, "rd,rs1,rs2"),
+      INSN(psub_w, "rd,rs1,rs2"),
+      INSN(psh1add_w, "rd,rs1,rs2"),
+      INSN(pssh1sadd_w, "rd,rs1,rs2"),
+      INSN(psll_ws, "rd,rs1,rs2"),
+      INSN(psra_ws, "rd,rs1,rs2"),
+      INSN(psrl_ws, "rd,rs1,rs2"),
+      INSN(pssha_ws, "rd,rs1,rs2"),
+      INSN(psshar_ws, "rd,rs1,rs2"),
+      INSN(psshl_ws, "rd,rs1,rs2"),
+      INSN(psshlr_ws, "rd,rs1,rs2"),
+      INSN(shl, "rd,rs1,rs2"),
+      INSN(shlr, "rd,rs1,rs2"),
+      INSN(pnclipp_b, "rd,rs1,rs2"),
+      INSN(pnclipp_h, "rd,rs1,rs2"),
+      INSN(pnclipp_w, "rd,rs1,rs2"),
+      INSN(pnclipup_b, "rd,rs1,rs2"),
+      INSN(pnclipup_h, "rd,rs1,rs2"),
+      INSN(pnclipup_w, "rd,rs1,rs2"),
+      INSN(ppaireo_w, "rd,rs1,rs2"),
+      INSN(ppairoe_w, "rd,rs1,rs2"),
+      INSN(ppairo_w, "rd,rs1,rs2"),
+      INSN(predsum_ws, "rd,rs1,rs2"),
+      INSN(predsumu_ws, "rd,rs1,rs2"),
 
       // Packed multiply/mac word-sized instructions (share opcode with RV32 scalar)
-      DEFINE_RTYPE(pmul_w_h00);
-      DEFINE_RTYPE(pmul_w_h01);
-      DEFINE_RTYPE(pmul_w_h11);
-      DEFINE_RTYPE(pmulu_w_h00);
-      DEFINE_RTYPE(pmulu_w_h01);
-      DEFINE_RTYPE(pmulu_w_h11);
-      DEFINE_RTYPE(pmulsu_w_h00);
-      DEFINE_RTYPE(pmulsu_w_h11);
-      DEFINE_RTYPE(pmulh_w);
-      DEFINE_RTYPE(pmulhu_w);
-      DEFINE_RTYPE(pmulhsu_w);
-      DEFINE_RTYPE(pmulh_w_h0);
-      DEFINE_RTYPE(pmulh_w_h1);
-      DEFINE_RTYPE(pmulhsu_w_h0);
-      DEFINE_RTYPE(pmulhsu_w_h1);
-      DEFINE_RTYPE(pmulhr_w);
-      DEFINE_RTYPE(pmulhru_w);
-      DEFINE_RTYPE(pmulhrsu_w);
-      DEFINE_RTYPE(pmulq_w);
-      DEFINE_RTYPE(pmulqr_w);
-      DEFINE_RTYPE(pmacc_w_h00);
-      DEFINE_RTYPE(pmacc_w_h01);
-      DEFINE_RTYPE(pmacc_w_h11);
-      DEFINE_RTYPE(pmaccu_w_h00);
-      DEFINE_RTYPE(pmaccu_w_h01);
-      DEFINE_RTYPE(pmaccu_w_h11);
-      DEFINE_RTYPE(pmaccsu_w_h00);
-      DEFINE_RTYPE(pmaccsu_w_h11);
-      DEFINE_RTYPE(pmhacc_w);
-      DEFINE_RTYPE(pmhaccu_w);
-      DEFINE_RTYPE(pmhaccsu_w);
-      DEFINE_RTYPE(pmhacc_w_h0);
-      DEFINE_RTYPE(pmhacc_w_h1);
-      DEFINE_RTYPE(pmhaccsu_w_h0);
-      DEFINE_RTYPE(pmhaccsu_w_h1);
-      DEFINE_RTYPE(pmhracc_w);
-      DEFINE_RTYPE(pmhraccu_w);
-      DEFINE_RTYPE(pmhraccsu_w);
-      DEFINE_RTYPE(pmqacc_w_h00);
-      DEFINE_RTYPE(pmqacc_w_h01);
-      DEFINE_RTYPE(pmqacc_w_h11);
-      DEFINE_RTYPE(pmqracc_w_h00);
-      DEFINE_RTYPE(pmqracc_w_h01);
-      DEFINE_RTYPE(pmqracc_w_h11);
-      DEFINE_RTYPE(pmq2add_w);
-      DEFINE_RTYPE(pmq2adda_w);
-      DEFINE_RTYPE(pmqr2add_w);
-      DEFINE_RTYPE(pmqr2adda_w);
+      INSN(pmul_w_h00, "rd,rs1,rs2"),
+      INSN(pmul_w_h01, "rd,rs1,rs2"),
+      INSN(pmul_w_h11, "rd,rs1,rs2"),
+      INSN(pmulu_w_h00, "rd,rs1,rs2"),
+      INSN(pmulu_w_h01, "rd,rs1,rs2"),
+      INSN(pmulu_w_h11, "rd,rs1,rs2"),
+      INSN(pmulsu_w_h00, "rd,rs1,rs2"),
+      INSN(pmulsu_w_h11, "rd,rs1,rs2"),
+      INSN(pmulh_w, "rd,rs1,rs2"),
+      INSN(pmulhu_w, "rd,rs1,rs2"),
+      INSN(pmulhsu_w, "rd,rs1,rs2"),
+      INSN(pmulh_w_h0, "rd,rs1,rs2"),
+      INSN(pmulh_w_h1, "rd,rs1,rs2"),
+      INSN(pmulhsu_w_h0, "rd,rs1,rs2"),
+      INSN(pmulhsu_w_h1, "rd,rs1,rs2"),
+      INSN(pmulhr_w, "rd,rs1,rs2"),
+      INSN(pmulhru_w, "rd,rs1,rs2"),
+      INSN(pmulhrsu_w, "rd,rs1,rs2"),
+      INSN(pmulq_w, "rd,rs1,rs2"),
+      INSN(pmulqr_w, "rd,rs1,rs2"),
+      INSN(pmacc_w_h00, "rd,rs1,rs2"),
+      INSN(pmacc_w_h01, "rd,rs1,rs2"),
+      INSN(pmacc_w_h11, "rd,rs1,rs2"),
+      INSN(pmaccu_w_h00, "rd,rs1,rs2"),
+      INSN(pmaccu_w_h01, "rd,rs1,rs2"),
+      INSN(pmaccu_w_h11, "rd,rs1,rs2"),
+      INSN(pmaccsu_w_h00, "rd,rs1,rs2"),
+      INSN(pmaccsu_w_h11, "rd,rs1,rs2"),
+      INSN(pmhacc_w, "rd,rs1,rs2"),
+      INSN(pmhaccu_w, "rd,rs1,rs2"),
+      INSN(pmhaccsu_w, "rd,rs1,rs2"),
+      INSN(pmhacc_w_h0, "rd,rs1,rs2"),
+      INSN(pmhacc_w_h1, "rd,rs1,rs2"),
+      INSN(pmhaccsu_w_h0, "rd,rs1,rs2"),
+      INSN(pmhaccsu_w_h1, "rd,rs1,rs2"),
+      INSN(pmhracc_w, "rd,rs1,rs2"),
+      INSN(pmhraccu_w, "rd,rs1,rs2"),
+      INSN(pmhraccsu_w, "rd,rs1,rs2"),
+      INSN(pmqacc_w_h00, "rd,rs1,rs2"),
+      INSN(pmqacc_w_h01, "rd,rs1,rs2"),
+      INSN(pmqacc_w_h11, "rd,rs1,rs2"),
+      INSN(pmqracc_w_h00, "rd,rs1,rs2"),
+      INSN(pmqracc_w_h01, "rd,rs1,rs2"),
+      INSN(pmqracc_w_h11, "rd,rs1,rs2"),
+      INSN(pmq2add_w, "rd,rs1,rs2"),
+      INSN(pmq2adda_w, "rd,rs1,rs2"),
+      INSN(pmqr2add_w, "rd,rs1,rs2"),
+      INSN(pmqr2adda_w, "rd,rs1,rs2"),
 
       // Packed multi-add word-sized instructions
-      DEFINE_RTYPE(pm2add_w);
-      DEFINE_RTYPE(pm2add_wx);
-      DEFINE_RTYPE(pm2addu_w);
-      DEFINE_RTYPE(pm2addsu_w);
-      DEFINE_RTYPE(pm2adda_w);
-      DEFINE_RTYPE(pm2adda_wx);
-      DEFINE_RTYPE(pm2addau_w);
-      DEFINE_RTYPE(pm2addasu_w);
-      DEFINE_RTYPE(pm2sub_w);
-      DEFINE_RTYPE(pm2sub_wx);
-      DEFINE_RTYPE(pm2suba_w);
-      DEFINE_RTYPE(pm2suba_wx);
-      DEFINE_RTYPE(pm4add_h);
-      DEFINE_RTYPE(pm4addu_h);
-      DEFINE_RTYPE(pm4addsu_h);
-      DEFINE_RTYPE(pm4adda_h);
-      DEFINE_RTYPE(pm4addau_h);
-      DEFINE_RTYPE(pm4addasu_h);
+      INSN(pm2add_w, "rd,rs1,rs2"),
+      INSN(pm2add_wx, "rd,rs1,rs2"),
+      INSN(pm2addu_w, "rd,rs1,rs2"),
+      INSN(pm2addsu_w, "rd,rs1,rs2"),
+      INSN(pm2adda_w, "rd,rs1,rs2"),
+      INSN(pm2adda_wx, "rd,rs1,rs2"),
+      INSN(pm2addau_w, "rd,rs1,rs2"),
+      INSN(pm2addasu_w, "rd,rs1,rs2"),
+      INSN(pm2sub_w, "rd,rs1,rs2"),
+      INSN(pm2sub_wx, "rd,rs1,rs2"),
+      INSN(pm2suba_w, "rd,rs1,rs2"),
+      INSN(pm2suba_wx, "rd,rs1,rs2"),
+      INSN(pm4add_h, "rd,rs1,rs2"),
+      INSN(pm4addu_h, "rd,rs1,rs2"),
+      INSN(pm4addsu_h, "rd,rs1,rs2"),
+      INSN(pm4adda_h, "rd,rs1,rs2"),
+      INSN(pm4addau_h, "rd,rs1,rs2"),
+      INSN(pm4addasu_h, "rd,rs1,rs2"),
 
       // R1-type packed word-sized unary instructions
-      DEFINE_R1TYPE(psext_w_b);
-      DEFINE_R1TYPE(psext_w_h);
-      DEFINE_R1TYPE(zip16p);
-      DEFINE_R1TYPE(zip16hp);
+      INSN(psext_w_b, "rd,rs1"),
+      INSN(psext_w_h, "rd,rs1"),
+      INSN(zip16p, "rd,rs1"),
+      INSN(zip16hp, "rd,rs1"),
 
       // Packed I-type with shamt (word-sized) - share opcode with RV32 scalar
-      DISASM_INSN("pslli.w", pslli_w, 0, {&xrd, &xrs1, &shamtw});
-      DISASM_INSN("psrai.w", psrai_w, 0, {&xrd, &xrs1, &shamtw});
-      DISASM_INSN("psrli.w", psrli_w, 0, {&xrd, &xrs1, &shamtw});
-      DISASM_INSN("psrari.w", psrari_w, 0, {&xrd, &xrs1, &shamtw});
-      DISASM_INSN("psati.w", psati_w, 0, {&xrd, &xrs1, &shamtw});
-      DISASM_INSN("pusati.w", pusati_w, 0, {&xrd, &xrs1, &shamtw});
-      DISASM_INSN("psslai.w", psslai_w, 0, {&xrd, &xrs1, &shamtw});
+      INSN(pslli_w, "rd,rs1,shamtw"),
+      INSN(psrai_w, "rd,rs1,shamtw"),
+      INSN(psrli_w, "rd,rs1,shamtw"),
+      INSN(psrari_w, "rd,rs1,shamtw"),
+      INSN(psati_w, "rd,rs1,shamtw"),
+      INSN(pusati_w, "rd,rs1,shamtw"),
+      INSN(psslai_w, "rd,rs1,shamtw"),
 
       // Packed load-immediate word-sized instructions
-      DISASM_INSN("pli.w", pli_w, 0, {&xrd, &p_imm10csl});
-      DISASM_INSN("plui.w", plui_w, 0, {&xrd, &p_imm10csr});
-    }
+      INSN(pli_w, "rd,p_imm10csl"),
+      INSN(plui_w, "rd,p_imm10csr"),
+    });
   }
-
 }
 
 disassembler_t::disassembler_t(const isa_parser_t *isa, bool strict)
