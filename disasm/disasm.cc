@@ -1052,26 +1052,31 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
   });
 
   // ext-h
-  if (ext_enabled('H')) add({
-    INSN(hlv_b, "rd,(rs1)"),
-    INSN(hlv_bu, "rd,(rs1)"),
-    INSN(hlv_h, "rd,(rs1)"),
-    INSN(hlv_hu, "rd,(rs1)"),
-    INSN(hlv_w, "rd,(rs1)"),
-    INSN(hlv_wu, "rd,(rs1)"),
-    INSN(hlv_d, "rd,(rs1)"),
+  if (ext_enabled('H')) {
+    add({
+      INSN(hlv_b, "rd,(rs1)"),
+      INSN(hlv_bu, "rd,(rs1)"),
+      INSN(hlv_h, "rd,(rs1)"),
+      INSN(hlv_hu, "rd,(rs1)"),
+      INSN(hlv_w, "rd,(rs1)"),
 
-    INSN(hlvx_hu, "rd,(rs1)"),
-    INSN(hlvx_wu, "rd,(rs1)"),
+      INSN(hlvx_hu, "rd,(rs1)"),
+      INSN(hlvx_wu, "rd,(rs1)"),
 
-    INSN(hsv_b, "rs2,(rs1)"),
-    INSN(hsv_h, "rs2,(rs1)"),
-    INSN(hsv_w, "rs2,(rs1)"),
-    INSN(hsv_d, "rs2,(rs1)"),
+      INSN(hsv_b, "rs2,(rs1)"),
+      INSN(hsv_h, "rs2,(rs1)"),
+      INSN(hsv_w, "rs2,(rs1)"),
 
-    INSN(hfence_gvma, "rs1,rs2"),
-    INSN(hfence_vvma, "rs1,rs2"),
-  });
+      INSN(hfence_gvma, "rs1,rs2"),
+      INSN(hfence_vvma, "rs1,rs2"),
+    });
+
+    if (xlen_eq(64)) add({
+      INSN(hlv_wu, "rd,(rs1)"),
+      INSN(hlv_d, "rd,(rs1)"),
+      INSN(hsv_d, "rs2,(rs1)"),
+    });
+  }
 
   // ext-c
   if (ext_enabled(EXT_ZCA)) {
