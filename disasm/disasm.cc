@@ -210,9 +210,14 @@ const operand_table_t& operand_table()
     OPERAND("b_imm5", std::to_string((int)insn.b_imm5())),
     OPERAND("bs", std::to_string((int)insn.bs())),
     OPERAND("rcon", std::to_string((int)insn.rcon())),
-    OPERAND("p_imm8", std::to_string((int)insn.p_imm8())),
-    OPERAND("p_imm10csl", std::to_string((int)insn.p_imm10csl())),
-    OPERAND("p_imm10csr", std::to_string((int)insn.p_imm10csr())),
+    // P: pli takes a signed immediate, plui the unshifted imm10, and the
+    // saturation width of sati/psati is the encoded field + 1
+    OPERAND("p_imm8", std::to_string((int8_t)insn.p_imm8())),
+    OPERAND("p_imm10csl", std::to_string(((int)insn.p_imm10csl() ^ 0x200) - 0x200)),
+    OPERAND("p_imm10csr", std::to_string(((int)(insn.p_imm10csr() >> 6) ^ 0x200) - 0x200)),
+    OPERAND("sat_h", std::to_string(insn.shamth() + 1)),
+    OPERAND("sat_w", std::to_string(insn.shamtw() + 1)),
+    OPERAND("sat_d", std::to_string(insn.shamtd() + 1)),
     OPERAND("shamtb", std::to_string((int)insn.shamtb())),
     OPERAND("shamth", std::to_string((int)insn.shamth())),
     OPERAND("shamtw", std::to_string((int)insn.shamtw())),
@@ -2164,13 +2169,13 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
     });
     if (xlen_eq(64)) {
       add({
-        INSN(sati, "rd,rs1,shamt"),
+        INSN(sati, "rd,rs1,sat_d"),
         INSN(usati, "rd,rs1,shamt"),
         INSN(srari, "rd,rs1,shamt"),
       });
     } else {
       add({
-        ALIAS("sati", sati_rv32, 0, "rd,rs1,shamtw"),
+        ALIAS("sati", sati_rv32, 0, "rd,rs1,sat_w"),
         ALIAS("usati", usati_rv32, 0, "rd,rs1,shamtw"),
         ALIAS("srari", srari_rv32, 0, "rd,rs1,shamtw"),
       });
@@ -2264,7 +2269,7 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
       INSN(psrli_b, "rd,rs1,shamtb"),
       INSN(psrli_h, "rd,rs1,shamth"),
       INSN(psrari_h, "rd,rs1,shamth"),
-      INSN(psati_h, "rd,rs1,shamth"),
+      INSN(psati_h, "rd,rs1,sat_h"),
       INSN(pusati_h, "rd,rs1,shamth"),
       INSN(psslai_h, "rd,rs1,shamth"),
 
@@ -2480,8 +2485,8 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
       INSN(psrli_dw, "rdp,rs1p,shamtw"),
       INSN(psrari_dh, "rdp,rs1p,shamth"),
       INSN(psrari_dw, "rdp,rs1p,shamtw"),
-      INSN(psati_dh, "rdp,rs1p,shamth"),
-      INSN(psati_dw, "rdp,rs1p,shamtw"),
+      INSN(psati_dh, "rdp,rs1p,sat_h"),
+      INSN(psati_dw, "rdp,rs1p,sat_w"),
       INSN(pusati_dh, "rdp,rs1p,shamth"),
       INSN(pusati_dw, "rdp,rs1p,shamtw"),
       INSN(psslai_dh, "rdp,rs1p,shamth"),
@@ -2720,7 +2725,7 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
       INSN(psrai_w, "rd,rs1,shamtw"),
       INSN(psrli_w, "rd,rs1,shamtw"),
       INSN(psrari_w, "rd,rs1,shamtw"),
-      INSN(psati_w, "rd,rs1,shamtw"),
+      INSN(psati_w, "rd,rs1,sat_w"),
       INSN(pusati_w, "rd,rs1,shamtw"),
       INSN(psslai_w, "rd,rs1,shamtw"),
 
