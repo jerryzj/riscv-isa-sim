@@ -158,6 +158,14 @@ std::string rvcm_pushpop_rlist(insn_t insn)
   }
 }
 
+std::string msetmtypei_operand(insn_t insn)
+{
+  // eM[alt], wN: SEW, altfmt (bit 28), and TWIDEN = mtwiden ? 1 << (mtwiden - 1) : 0
+  unsigned mtwiden = insn.rs1() & 3;
+  return "e" + std::to_string(insn.v_sew()) + ((insn.bits() >> 28) & 1 ? "alt" : "") +
+         ", w" + std::to_string(mtwiden ? 1 << (mtwiden - 1) : 0);
+}
+
 #define OPERAND(name, expr) \
   {name, operand_t([](UNUSED insn_t insn) -> std::string { return expr; })}
 
@@ -256,6 +264,10 @@ const operand_table_t& operand_table()
     OPERAND("v_vtype", v_vtype(insn)),
     OPERAND("bdota_vs2", vr_name[insn.rs2() & -8]),
     OPERAND("bdota_ci", std::to_string(8 * (insn.rs2() % 8))),
+
+    // Zvt: matrix tile number in rd[4:1] (rd[4:2] for 3-bit forms, whose rd[1] is 0)
+    OPERAND("mtd", "mt" + std::to_string(insn.rd() >> 1)),
+    OPERAND("msetmtypei", msetmtypei_operand(insn)),
   };
   return table;
 }
@@ -1151,6 +1163,39 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
   if (ext_enabled(EXT_ZCMT)) add({
     ALIAS("cm.jt", cm_jalt, 0x380, "rvcm_jt_index"),
     INSN(cm_jalt, "rvcm_jt_index"),
+  });
+
+  // Zvt goes before the vector loads/stores: vtle*/vtse* reuse the reserved
+  // mew=1 encodings that the vle*/vse* generator below also produces.
+  if (ext_enabled(EXT_ZVTBASE)) add({
+    INSN(msettn, "rd,rs1"),
+    INSN(msettm, "rd,rs1"),
+    INSN(msettk, "rd,rs1"),
+    INSN(msetmtype, "rs1,rs2"),
+    INSN(msetmtypei, "msetmtypei"),
+    INSN(vtle8, "rs2,(rs1)"),
+    INSN(vtle16, "rs2,(rs1)"),
+    INSN(vtle32, "rs2,(rs1)"),
+    INSN(vtle64, "rs2,(rs1)"),
+    INSN(vtse8, "rs2,(rs1)"),
+    INSN(vtse16, "rs2,(rs1)"),
+    INSN(vtse32, "rs2,(rs1)"),
+    INSN(vtse64, "rs2,(rs1)"),
+    INSN(vtmv_v_t, "vd,rs1"),
+    INSN(vtmv_t_v, "rs1,vs2"),
+    INSN(vtzero, "mtd"),
+    INSN(vtdiscard, ""),
+  });
+
+  if (ext_enabled(EXT_ZVTFMM) || ext_enabled(EXT_ZVTDMM) || ext_enabled(EXT_ZVTFP16FMM) ||
+      ext_enabled(EXT_ZVTBF16FMM) || ext_enabled(EXT_ZVTOFP8FMM)) add({
+    INSN(vtfmm_tvv, "mtd,vs2,vs1"),
+    INSN(vtfmm_alt_tvv, "mtd,vs2,vs1"),
+  });
+
+  if (ext_enabled(EXT_ZVTI8I32MM)) add({
+    INSN(vtmmu_tvv, "mtd,vs2,vs1"),
+    INSN(vtmms_tvv, "mtd,vs2,vs1"),
   });
 
   if (isa->has_any_vector() || !strict) {
