@@ -338,12 +338,16 @@ std::string disassembler_t::disassemble(insn_t insn) const
 #define INSN_X(code, extra, fmt) {#code, match_##code, mask_##code | (extra), fmt}
 // Another mnemonic for (a subset of) an encoding, e.g. a pseudo-instruction.
 #define ALIAS(name, code, extra, fmt) {name, match_##code, mask_##code | (extra), fmt}
-// An AMO and its .rl/.aq/.aqrl variants.
-#define AMO(code) \
-  {#code,         match_##code,             mask_##code | mask_aqrl, "rd,rs2,(rs1)"}, \
-  {#code ".rl",   match_##code | (1 << 25), mask_##code | mask_aqrl, "rd,rs2,(rs1)"}, \
-  {#code ".aq",   match_##code | (2 << 25), mask_##code | mask_aqrl, "rd,rs2,(rs1)"}, \
-  {#code ".aqrl", match_##code | (3 << 25), mask_##code | mask_aqrl, "rd,rs2,(rs1)"}
+// An instruction and its .rl/.aq/.aqrl variants.
+#define AQRL(code, fmt) \
+  {#code,         match_##code,             mask_##code | mask_aqrl, fmt}, \
+  {#code ".rl",   match_##code | (1 << 25), mask_##code | mask_aqrl, fmt}, \
+  {#code ".aq",   match_##code | (2 << 25), mask_##code | mask_aqrl, fmt}, \
+  {#code ".aqrl", match_##code | (3 << 25), mask_##code | mask_aqrl, fmt}
+#define AMO(code) AQRL(code, "rd,rs2,(rs1)")
+// A Zalasr load-acquire/store-release; with both aq and rl set it is <name>.aqrl.
+#define AQ_OR_RL(name, code, fmt) \
+  {name ".aqrl", match_##code | mask_aqrl, mask_##code | mask_aqrl, fmt}, INSN(code, fmt)
 
 #define ext_enabled_strict(x) (isa->extension_enabled(x))
 #define ext_enabled(x) (ext_enabled_strict(x) || !strict)
@@ -451,12 +455,12 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
 
   if (ext_enabled(EXT_ZALRSC)) {
     add({
-      INSN(lr_w, "rd,(rs1)"),
+      AQRL(lr_w, "rd,(rs1)"),
       AMO(sc_w),
     });
 
     if (xlen_eq(64)) add({
-      INSN(lr_d, "rd,(rs1)"),
+      AQRL(lr_d, "rd,(rs1)"),
       AMO(sc_d),
     });
   }
@@ -1955,16 +1959,21 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
     INSN(vsm3me_vv, vv),
   });
 
-  if (ext_enabled(EXT_ZALASR)) add({
-    INSN(lb_aq, "rd,(rs1)"),
-    INSN(lh_aq, "rd,(rs1)"),
-    INSN(lw_aq, "rd,(rs1)"),
-    INSN(ld_aq, "rd,(rs1)"),
-    INSN(sb_rl, "rs2,(rs1)"),
-    INSN(sh_rl, "rs2,(rs1)"),
-    INSN(sw_rl, "rs2,(rs1)"),
-    INSN(sd_rl, "rs2,(rs1)"),
-  });
+  if (ext_enabled(EXT_ZALASR)) {
+    add({
+      AQ_OR_RL("lb", lb_aq, "rd,(rs1)"),
+      AQ_OR_RL("lh", lh_aq, "rd,(rs1)"),
+      AQ_OR_RL("lw", lw_aq, "rd,(rs1)"),
+      AQ_OR_RL("sb", sb_rl, "rs2,(rs1)"),
+      AQ_OR_RL("sh", sh_rl, "rs2,(rs1)"),
+      AQ_OR_RL("sw", sw_rl, "rs2,(rs1)"),
+    });
+
+    if (xlen_eq(64)) add({
+      AQ_OR_RL("ld", ld_aq, "rd,(rs1)"),
+      AQ_OR_RL("sd", sd_rl, "rs2,(rs1)"),
+    });
+  }
 
   if (ext_enabled(EXT_ZICFISS)) {
     add({
