@@ -1343,19 +1343,19 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
       INSN(vmslt_vx, vx),
       INSN(vmsleu_vv, vv),
       INSN(vmsleu_vx, vx),
-      INSN(vmsleu_vi, viu),
+      INSN(vmsleu_vi, vi),
       INSN(vmsle_vv, vv),
       INSN(vmsle_vx, vx),
       INSN(vmsle_vi, vi),
       INSN(vmsgtu_vx, vx),
-      INSN(vmsgtu_vi, viu),
+      INSN(vmsgtu_vi, vi),
       INSN(vmsgt_vx, vx),
       INSN(vmsgt_vi, vi),
 
       //0b10_0000
       INSN(vsaddu_vv, vv),
       INSN(vsaddu_vx, vx),
-      INSN(vsaddu_vi, viu),
+      INSN(vsaddu_vi, vi),
       INSN(vsadd_vv, vv),
       INSN(vsadd_vx, vx),
       INSN(vsadd_vi, vi),
@@ -1365,7 +1365,7 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
       INSN(vssub_vx, vx),
       INSN(vsll_vv, vv),
       INSN(vsll_vx, vx),
-      INSN(vsll_vi, vi),
+      INSN(vsll_vi, viu),
       INSN(vmv1r_v, "vd,vs2"),
       INSN(vmv2r_v, "vd,vs2"),
       INSN(vmv4r_v, "vd,vs2"),
@@ -1695,8 +1695,8 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
   });
 
   if (ext_enabled(EXT_ZVFBFWMA)) add({
-    INSN(vfwmaccbf16_vv, vv),
-    INSN(vfwmaccbf16_vf, vf),
+    INSN(vfwmaccbf16_vv, mvv),
+    INSN(vfwmaccbf16_vf, mvf),
   });
 
   if (ext_enabled(EXT_ZMMUL)) {
