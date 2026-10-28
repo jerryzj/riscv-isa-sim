@@ -641,6 +641,10 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
     {"csrrci", match_csrrci, mask_csrrci, "rd,csr,zimm5"},
   });
 
+  if (ext_enabled(EXT_SMRNMI)) add({
+    INSN(mnret, ""),
+  });
+
   if (ext_enabled('S')) add({
     INSN(sret, ""),
     INSN(sfence_vma, "rs1,rs2"),
