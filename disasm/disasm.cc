@@ -704,11 +704,14 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
       INSN(xnor, "rd,rs1,rs2"),
       INSN(sext_b, "rd,rs1"),
       INSN(sext_h, "rd,rs1"),
-      INSN(rev8, "rd,rs1"),
       INSN(orc_b, "rd,rs1"),
       {"zext.h", (isa->get_max_xlen() == 32 ? match_pack : match_packw), mask_pack | mask_rs2, "rd,rs1"},
     });
+    if (xlen_eq(32)) add({
+      ALIAS("rev8", rev8_rv32, 0, "rd,rs1"),
+    });
     if (xlen_eq(64)) add({
+      INSN(rev8, "rd,rs1"),
       INSN(rorw, "rd,rs1,rs2"),
       INSN(rolw, "rd,rs1,rs2"),
       INSN_X(roriw, mask_shamt_msb, "rd,rs1,shamt"),
@@ -738,14 +741,24 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
   if (ext_enabled(EXT_ZBKB)) {
     add({
       INSN(brev8, "rd,rs1"),
-      INSN(rev8, "rd,rs1"),
       INSN(pack, "rd,rs1,rs2"),
       INSN(packh, "rd,rs1,rs2"),
     });
+    if (xlen_eq(32)) add({
+      ALIAS("rev8", rev8_rv32, 0, "rd,rs1"),
+      INSN(zip, "rd,rs1"),
+      INSN(unzip, "rd,rs1"),
+    });
     if (xlen_eq(64)) add({
+      INSN(rev8, "rd,rs1"),
       INSN(packw, "rd,rs1,rs2"),
     });
   }
+
+  if (ext_enabled(EXT_ZBKX)) add({
+    INSN(xperm4, "rd,rs1,rs2"),
+    INSN(xperm8, "rd,rs1,rs2"),
+  });
 
   if (ext_enabled(EXT_SVINVAL)) add({
     INSN(sfence_w_inval, ""),
@@ -1787,7 +1800,7 @@ void disassembler_t::add_instructions(const isa_parser_t* isa, bool strict)
     });
   }
 
-  if (ext_enabled(EXT_ZKND) || ext_enabled(EXT_ZKNE)) add({
+  if ((ext_enabled(EXT_ZKND) || ext_enabled(EXT_ZKNE)) && xlen_eq(64)) add({
     INSN(aes64ks1i, "rd,rs1,rcon"),
     INSN(aes64ks2, "rd,rs1,rs2"),
   });
